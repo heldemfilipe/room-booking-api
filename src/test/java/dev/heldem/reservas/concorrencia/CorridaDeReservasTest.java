@@ -102,21 +102,18 @@ class CorridaDeReservasTest extends ApiTestBase {
         return new Rodada(criadas, conflitos, outros, ativas, totalMs, latencias);
     }
 
-    // >>> TESTE DA VERSÃO INGÊNUA (a corrida existe). Cada correção troca este teste por "somenteUmaReservaPorCorrida".
+    // >>> TESTE DA CORREÇÃO: em TODAS as rodadas, exatamente uma reserva (e no banco, não só nas respostas), as outras
+    // recebem 409, e nenhuma requisição termina em erro inesperado (500).
     @Test
-    void reproduzACorridaNaVersaoIngenua() throws Exception {
-        List<Integer> ativasPorRodada = new ArrayList<>();
-        boolean duplicou = false;
-        for (int r = 1; r <= RODADAS && !duplicou; r++) {
+    void somenteUmaReservaPorCorrida() throws Exception {
+        for (int r = 1; r <= RODADAS; r++) {
             Rodada rodada = rodada();
-            ativasPorRodada.add(rodada.ativasNoBanco());
-            duplicou = rodada.ativasNoBanco() > 1;
-        }
 
-        assertThat(duplicou)
-                .as("a corrida deveria gravar mais de uma reserva ATIVA no mesmo horário; reservas por rodada: %s",
-                        ativasPorRodada)
-                .isTrue();
+            assertThat(rodada.ativasNoBanco()).as("rodada %d: reservas ATIVAS gravadas", r).isEqualTo(1);
+            assertThat(rodada.criadas()).as("rodada %d: respostas 201", r).isEqualTo(1);
+            assertThat(rodada.conflitos()).as("rodada %d: respostas 409", r).isEqualTo(CLIENTES - 1);
+            assertThat(rodada.outros()).as("rodada %d: outras respostas (500 etc.)", r).isZero();
+        }
     }
 
     /**
