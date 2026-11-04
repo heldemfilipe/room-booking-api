@@ -59,7 +59,7 @@ O **Flyway é dono do schema** (`src/main/resources/db/migration`): o Hibernate 
 confere se as entidades batem com o banco e nunca cria nem altera tabela. Pacotes: `sala`, `reserva` e `comum`
 (erros, paginação e datas) e `seguranca` (filtros, papéis e respostas 401 e 403).
 
-O cache (Redis) e a observabilidade (Prometheus e Grafana) entram nas Etapas 4 e 5.
+A observabilidade (Prometheus e Grafana) entra na Etapa 5.
 
 ## Tecnologias
 
@@ -68,7 +68,7 @@ O cache (Redis) e a observabilidade (Prometheus e Grafana) entram nas Etapas 4 e
 | Linguagem e framework | Java 25 e Spring Boot 4.1.2 (Web MVC, Data JPA, Bean Validation, Actuator) |
 | Banco | PostgreSQL 17, com Flyway para o schema e o Hibernate só validando (`ddl-auto=validate`) |
 | Segurança | Spring Security 7 como resource server JWT, com Keycloak 26.8.1 (realm importado de JSON versionado) |
-| Cache | Redis (a fazer, Etapa 4) |
+| Cache | Redis 8, com `spring-boot-starter-data-redis` e `spring-boot-starter-cache` (Etapa 4) |
 | Observabilidade | Micrometer, OpenTelemetry, Prometheus e Grafana (a fazer, Etapa 5) |
 | Testes | JUnit 5 e Testcontainers com PostgreSQL de verdade, sem mock de banco; tokens JWT reais assinados com uma chave de teste |
 | Build | Maven com wrapper (`./mvnw`), sem instalar o Maven |
@@ -78,7 +78,7 @@ O cache (Redis) e a observabilidade (Prometheus e Grafana) entram nas Etapas 4 e
 Requisitos: JDK 25 e Docker.
 
 ```bash
-docker compose up -d         # PostgreSQL 17 (porta 5432, com volume) e Keycloak (porta 8180)
+docker compose up -d         # PostgreSQL 17 (porta 5432, com volume), Keycloak (porta 8180) e Redis (porta 6379)
 ./mvnw spring-boot:run       # a API sobe na porta 8080 e o Flyway aplica as migrations
 docker compose down -v       # para tudo e apaga o volume
 ```
@@ -347,6 +347,65 @@ na segunda, com `Idempotency-Replayed: true`.
 agora** (se foi cancelada depois, mostra `CANCELADA`), e não uma cópia congelada da primeira resposta; a identidade da
 requisição é sala, início e fim.
 
+### Cache da listagem de salas com Redis (Etapa 4)
+
+**O que é cacheado.** Só `GET /salas` (a lista, em `SalaService.listar()`), no Redis, por 5 minutos
+(`app.cache.salas-ttl`). Criar, atualizar e remover sala esvaziam o cache (`@CacheEvict(allEntries = true)`). A lista de
+salas é lida o tempo todo e muda raramente: o caso clássico para cache.
+
+**Por que as reservas NÃO são cacheadas.** Reserva muda o tempo todo (cada criação e cada cancelamento) e a resposta tem
+que ser exata: um horário que o cache ainda mostra como livre vira um 409 depois de o cliente já ter decidido. Pior, a
+verificação de conflito (`SELECT ... FOR UPDATE` e a constraint de exclusão da Etapa 3) precisa ver o estado real do
+banco; cachear a leitura só abriria uma janela para a decisão ser tomada em cima de um dado velho. Cache serve para dado
+que pode ficar levemente velho sem ninguém ser prejudicado; reserva não é esse dado.
+
+**Decisões de implementação (cada uma tem um teste):**
+
+| Decisão | Por quê |
+|---|---|
+| Guardar o DTO (`List<SalaResponse>`), não a entidade JPA | A entidade tem estado do Hibernate e relações preguiçosas; o DTO é o que a API devolve de qualquer jeito |
+| JSON tipado, sem nome de classe dentro do valor | Legível no `redis-cli` e nada além de `List<SalaResponse>` é instanciado a partir do que está no Redis (`CacheDeSalasTest`) |
+| Cache transacional (`transactionAware()`) | Sem isso o evict roda antes do commit: um leitor concorrente relê o valor antigo do banco e o devolve ao cache, que fica velho até o TTL |
+| Falha do Redis não derruba a API (`CacheTolerante`) | O cache é uma otimização, não uma dependência; cada falha vira log e o contador `reservas.cache.erros` (`RedisForaDoArTest`) |
+| Timeouts de 1 s no Redis | Redis "pendurado" (e não recusando conexão) é o caso que prende threads; o teste pausa o contêiner |
+| `/actuator/metrics` só para ADMIN | As métricas do cache expõem o comportamento interno; o que não está exposto continua fechado (`CacheDeSalasTest`) |
+
+**Métricas (Micrometer).** `GET /actuator/metrics/cache.gets?tag=cache:salas&tag=result:hit` (e `result:miss`), mais
+`cache.puts` e `cache.removals`, com token de ADMIN. O teste confere que a segunda listagem soma um `hit` e nenhum `miss`.
+
+**Experimento 1: alterar direto no banco.** Listo as salas (entra no cache), altero a capacidade com um `UPDATE` no
+banco, sem passar pela API, e listo de novo: a API continua devolvendo o valor ANTIGO, porque nada esvaziou o cache. O
+valor novo só aparece quando a entrada vence. É o preço do cache, e o TTL é o limite dele: com 5 minutos, uma alteração
+feita fora da API demora até 5 minutos para aparecer. Alterações pela API aparecem na hora (o evict). No teste
+(`TtlDoCacheTest`) encurto o TTL da entrada no Redis para 2 s em vez de esperar os 5 minutos, e o valor novo aparece
+depois disso; o TTL de 5 minutos em si está conferido em `CacheDeSalasTest`.
+
+**Experimento 2: estouro de cache (cache stampede).** Esvazio o cache e disparo 50 `GET /salas` idênticos ao mesmo tempo
+(200 salas no banco; 10 rodadas depois de uma de aquecimento). Contei as consultas que de fato chegaram ao banco com as
+estatísticas do Hibernate (`EstampidoDoCacheTest`):
+
+| Configuração | Consultas ao banco por rodada (10 rodadas) |
+|---|---|
+| `@Cacheable` sem `sync` | 18, 12, 10, 9, 11, 0, 7, 18, 12, 13 |
+| `@Cacheable(sync = true)`, writer padrão do Redis | 8, 6, 19, 11, 5, 25, 16, 26, 9, 8 |
+| `@Cacheable(sync = true)` + `lockingRedisCacheWriter` | 1, 1, 1, 1, 1, 1, 1, 1, 1, 1 |
+
+Duas coisas que eu não esperava:
+
+- **`sync = true` sozinho não resolve com Redis.** O writer padrão (`nonLocking`) não trava nada: com `sync` ele só faz
+  "lê, se não achar chama o método, grava" (é o que a interface `RedisCacheWriter` faz por padrão), e as 50 requisições passam pela leitura antes de a primeira gravar (com
+  10 rodadas por linha, não vejo diferença clara entre as duas primeiras). O que funcionou foi trocar para o
+  `lockingRedisCacheWriter`, que usa um lock no próprio Redis (por isso vale também entre várias instâncias da API).
+  O custo é uma espera por lock com intervalo de verificação, só na hora do preenchimento.
+- **O contador de `miss` não conta consultas ao banco.** Com o writer com lock, as requisições que esperam pelo lock
+  contam miss mais de uma vez (nas rodadas medidas, de 4 a 51 misses para 1 consulta). Para saber quantas vezes o banco
+  foi consultado, conte no banco, como o teste faz.
+
+Uma rodada da primeira linha deu 0 consultas (o cache já estava preenchido quando as requisições chegaram) e eu não
+investiguei a causa; mantive o número na tabela em vez de descartá-lo. O teste só afirma o resultado final (no máximo 1
+consulta por rodada com o lock); as duas primeiras linhas vêm da execução anterior à troca do writer, e não ficaram
+como teste.
+
 ## Custo
 
 **Zero.** Tudo roda na máquina local com Docker; nada é aplicado na AWS. A parte opcional do roteiro que subiria a API
@@ -358,7 +417,7 @@ no ECS não será feita.
 - [x] Etapa 1: modelo relacional, Flyway e CRUD (migrations, CRUD de salas e reservas, N+1 medido e corrigido)
 - [x] Etapa 2: autenticação e autorização (Keycloak, JWT, papéis, regra de dono, 401 e 403 testados)
 - [x] Etapa 3: concorrência e reserva dupla (corrida reproduzida e medida, três soluções comparadas, 409, idempotência)
-- [ ] Etapa 4: cache com Redis
+- [x] Etapa 4: cache com Redis (TTL, evict, métricas, inconsistência e estouro de cache medidos)
 - [ ] Etapa 5: observabilidade
 - [ ] Etapa 6: entrega
 
