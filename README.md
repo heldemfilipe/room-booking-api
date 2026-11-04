@@ -6,8 +6,8 @@ API de reservas de salas por horário, com Spring Boot e PostgreSQL: impede que 
 autentica com Keycloak, faz cache em Redis e expõe métricas no Grafana. Tudo roda local com Docker Compose.
 
 > **Status:** projeto de estudo, em construção. Prontos: o modelo relacional, o CRUD, a autenticação com autorização e a
-> proteção contra reserva dupla, com a corrida medida, o cache com Redis e a observabilidade com um experimento
-> de lentidão (Etapas 0 a 5). Falta a entrega (Etapa 6).
+> proteção contra reserva dupla, com a corrida medida, o cache com Redis, a observabilidade com um experimento
+> de lentidão e a entrega (imagem, CI e teste de carga) (Etapas 0 a 6).
 > O que não existe está marcado como "a fazer".
 
 ## Problema
@@ -479,6 +479,72 @@ o endpoint com `segundos=2`.
 - O dashboard foi capturado com o painel "Reservas criadas" mostrando casas decimais (`increase` extrapola); depois
   troquei a consulta por `round(...)`, e o arquivo versionado já está assim, mas não refiz a imagem.
 
+### Entrega: imagem, CI e teste de carga (Etapa 6)
+
+**Imagem (`Dockerfile`).** Duas etapas: o JDK 25 compila (as dependências numa camada própria, refeita só quando o `pom.xml`
+muda) e só o JRE 25 mais o jar vão para a imagem final, que roda como **usuário 10001** (não root; conferido com
+`docker exec rb-api id`: `uid=10001`). `-XX:MaxRAMPercentage=75` dimensiona o heap pela memória do contêiner. A imagem tem
+587 MB (base `eclipse-temurin:25-jre-noble`; não tentei reduzi-la). A porta 8081 (Actuator) existe na imagem, mas
+**não deve ser publicada para fora**.
+
+```bash
+docker build -t room-booking-api:local .
+docker compose up -d db keycloak redis jaeger
+docker run -d --name rb-api -p 8080:8080 -p 8081:8081 \
+  -e SPRING_DATASOURCE_URL=jdbc:postgresql://host.docker.internal:5432/reservas \
+  -e REDIS_HOST=host.docker.internal \
+  -e KEYCLOAK_ISSUER_URI=http://host.docker.internal:8180/realms/reservas \
+  -e OTLP_TRACES_ENDPOINT=http://host.docker.internal:4318/v1/traces \
+  room-booking-api:local
+```
+
+(O emissor do token é o do Keycloak como o cliente o enxerga: se o token for pedido em `host.docker.internal:8180`, a API
+tem que validar contra essa mesma URL.)
+
+**Trivy.** Escaneei a imagem localmente (`aquasec/trivy:0.76.1`, `--severity HIGH,CRITICAL --ignore-unfixed`): **0
+vulnerabilidades** no Ubuntu 24.04 da base e **0** no jar. Limites: só vulnerabilidades (não segredos nem
+configuração), e `--ignore-unfixed` esconde as que ainda não têm correção. É o retrato de hoje: o banco de
+vulnerabilidades muda todo dia.
+
+**CI (`.github/workflows`).**
+
+| Workflow | Quando roda | O que faz |
+|---|---|---|
+| `ci.yml` (job `build`) | push na `main` e pull request | `./mvnw verify` (testes com Testcontainers) |
+| `ci.yml` (job `imagem`) | idem | constrói a imagem e roda o Trivy (HIGH/CRITICAL com correção derrubam o job); não publica |
+| `publicar.yml` | **só ao criar uma tag `v*`** | constrói, escaneia com o Trivy, e SÓ SE passar faz login no GHCR (com o `GITHUB_TOKEN` do próprio job) e publica `ghcr.io/<dono>/room-booking-api` com as tags `X.Y.Z` e `sha-...` |
+
+Sem cron e sem segredos cadastrados à mão. **Nada disto foi executado no GitHub:** os dois arquivos foram só validados com o
+`actionlint` (sem erros). O job `imagem` roda sozinho no próximo push, e o `publicar.yml` nunca rodou, então
+a publicação no GHCR está **não executada**. Criar a tag `v1.0.0` é decisão do dono do repositório.
+
+**Teste de carga (k6, `k6/carga.js`).** Taxa de chegada constante de 100 iterações por segundo durante 60 s (a carga não
+diminui quando a API fica lenta): 80% listagens de salas e 20% reservas de horários únicos (sem conflito esperado), com
+tokens reais do Keycloak. Os limites são `thresholds`: se algum estourar, o k6 sai com código diferente de 0.
+
+| Limite | Valor | Medido (`k6/resultados/carga-2026-11-04.json`) |
+|---|---|---|
+| erros (`http_req_failed`) | < 1% | 0% (6.023 requisições) |
+| p95 da listagem | < 100 ms | 6,1 ms |
+| p95 da reserva | < 200 ms | 11,2 ms |
+| checks (201 e 200) | > 99% | 100% (6.001 de 6.001) |
+
+```bash
+docker run --rm -i -e API=http://host.docker.internal:8080 -e KEYCLOAK=http://host.docker.internal:8180 \
+  -v "$PWD/k6:/k6" grafana/k6:1.8.2 run /k6/carga.js
+```
+
+Provei que o limite derruba o teste: com `-e LIMITE_LISTAR=1` (1 ms) o k6 marcou o threshold como violado
+(`p(95)<1`, medido 5,77 ms) e saiu com **código 99**.
+
+**Limites do que eu medi.** Tudo numa máquina só (API, PostgreSQL, Redis, Keycloak e o próprio k6 dividindo CPU), então os
+números mostram que a configuração aguenta 100 req/s com folga ENTRE ELES, não a capacidade da API: **não procurei o ponto
+de saturação**. Os limites (100 e 200 ms) foram escolhidos largos, bem acima do medido, para não ficarem
+instáveis em outra máquina; não vêm de um SLO real. Rodei uma vez para o resultado versionado.
+
+**Não feito (declarado desde o início):** subir no ECS com o módulo `ecs-service` do Terraform (parte opcional do roteiro;
+nada é aplicado na AWS).
+
 ## Custo
 
 **Zero.** Tudo roda na máquina local com Docker; nada é aplicado na AWS. A parte opcional do roteiro que subiria a API
@@ -492,7 +558,7 @@ no ECS não será feita.
 - [x] Etapa 3: concorrência e reserva dupla (corrida reproduzida e medida, três soluções comparadas, 409, idempotência)
 - [x] Etapa 4: cache com Redis (TTL, evict, métricas, inconsistência e estouro de cache medidos)
 - [x] Etapa 5: observabilidade (sondas, métricas, dashboard e alertas provisionados, logs JSON, traces, experimento `pg_sleep`)
-- [ ] Etapa 6: entrega
+- [x] Etapa 6: entrega (Dockerfile não-root, CI com Trivy e publicação no GHCR em tag, k6 com thresholds); ECS não será feito
 
 ## Licença
 
