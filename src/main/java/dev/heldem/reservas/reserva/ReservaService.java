@@ -46,13 +46,21 @@ public class ReservaService {
     }
 
     /**
-     * A garantia de que não há reserva dupla é do BANCO: a exclusion constraint ex_reservas_sem_sobreposicao (migration
-     * V3). A consulta de sobreposição abaixo continua, mas só para dar a resposta 409 sem um erro de banco no caso comum;
-     * quem fecha a corrida é a constraint, e a violação dela também vira 409, nunca 500.
+     * Reserva dupla, em duas camadas (veja o experimento no README):
+     * <ol>
+     *   <li><b>A garantia é do BANCO:</b> a exclusion constraint ex_reservas_sem_sobreposicao (migration V3) recusa
+     *       qualquer reserva ativa que se sobreponha a outra da mesma sala, venha de onde vier, inclusive de SQL direto.</li>
+     *   <li><b>A fila é do lock pessimista:</b> a primeira coisa que a transação faz é trancar a linha da sala (SELECT ...
+     *       FOR UPDATE), então as reservas da MESMA sala são feitas uma de cada vez. Sozinha, a constraint sob disputa
+     *       pesada pelo mesmo horário gerava deadlocks em cascata (cauda de segundos); com o lock, quem espera já enxerga a
+     *       reserva da frente na consulta de sobreposição e recebe 409 sem erro de banco nenhum.</li>
+     * </ol>
+     * A consulta de sobreposição dá a resposta 409 clara no caso comum; se ainda assim a constraint recusar (ou o banco
+     * derrubar por deadlock), isso também vira 409, nunca 500.
      */
     @Transactional
     public ReservaResponse criar(String usuarioId, CriarReservaRequest request) {
-        Sala sala = salaService.buscar(request.salaId()); // 404 se a sala não existir
+        Sala sala = salaService.buscarParaReservar(request.salaId()); // 404 se a sala não existir; tranca a linha
         Instant inicio = Datas.paraOBanco(request.inicio());
         Instant fim = Datas.paraOBanco(request.fim());
         if (repository.existeSobreposicao(sala.getId(), inicio, fim)) {

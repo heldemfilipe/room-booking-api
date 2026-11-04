@@ -54,6 +54,13 @@ public class SalaService {
                 .orElseThrow(() -> new RecursoNaoEncontradoException("Sala " + id + " não encontrada."));
     }
 
+    /** A sala com a linha trancada até o fim da transação: usada por quem cria reserva (veja SalaRepository). */
+    @Transactional
+    public Sala buscarParaReservar(UUID id) {
+        return repository.buscarParaReservar(id)
+                .orElseThrow(() -> new RecursoNaoEncontradoException("Sala " + id + " não encontrada."));
+    }
+
     @Transactional
     public Sala atualizar(UUID id, SalaRequest request) {
         Sala sala = buscar(id);
