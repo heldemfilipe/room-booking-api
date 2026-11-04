@@ -19,7 +19,7 @@ class SalaControllerTest extends ApiTestBase {
         assertThat(resposta).bodyJson().extractingPath("$.nome").isEqualTo("Sala Azul");
         assertThat(resposta).bodyJson().extractingPath("$.capacidade").isEqualTo(8);
         assertThat(resposta).bodyJson().extractingPath("$.id").isNotNull();
-        assertThat(mvc.get().uri(resposta.getResponse().getHeader("Location")))
+        assertThat(get(resposta.getResponse().getHeader("Location")))
                 .hasStatusOk().bodyJson().extractingPath("$.nome").isEqualTo("Sala Azul");
     }
 
@@ -52,7 +52,7 @@ class SalaControllerTest extends ApiTestBase {
         criarSala("Alfa", 6);
         criarSala("Meio", 8);
 
-        var lista = mvc.get().uri("/salas");
+        var lista = get("/salas");
 
         assertThat(lista).hasStatusOk();
         assertThat(lista).bodyJson().extractingPath("$[0].nome").isEqualTo("Alfa");
@@ -83,19 +83,19 @@ class SalaControllerTest extends ApiTestBase {
 
     @Test
     void salaInexistenteDevolve404EIdQueNaoEUuidDevolve400() {
-        assertThat(mvc.get().uri("/salas/{id}", UUID.randomUUID())).hasStatus(HttpStatus.NOT_FOUND);
+        assertThat(get("/salas/{id}", UUID.randomUUID())).hasStatus(HttpStatus.NOT_FOUND);
         assertThat(put("/salas/" + UUID.randomUUID(), "{\"nome\":\"X\",\"capacidade\":5}"))
                 .hasStatus(HttpStatus.NOT_FOUND);
-        assertThat(mvc.delete().uri("/salas/{id}", UUID.randomUUID())).hasStatus(HttpStatus.NOT_FOUND);
-        assertThat(mvc.get().uri("/salas/{id}", "abc")).hasStatus(HttpStatus.BAD_REQUEST);
+        assertThat(delete("/salas/{id}", UUID.randomUUID()).exchange()).hasStatus(HttpStatus.NOT_FOUND);
+        assertThat(get("/salas/{id}", "abc")).hasStatus(HttpStatus.BAD_REQUEST);
     }
 
     @Test
     void removerSalaSemReservasDevolve204EDepoisDeRemovidaDevolve404() {
         String id = criarSala("Sala D", 10);
 
-        assertThat(mvc.delete().uri("/salas/{id}", id)).hasStatus(HttpStatus.NO_CONTENT);
-        assertThat(mvc.get().uri("/salas/{id}", id)).hasStatus(HttpStatus.NOT_FOUND);
+        assertThat(delete("/salas/{id}", id).exchange()).hasStatus(HttpStatus.NO_CONTENT);
+        assertThat(get("/salas/{id}", id)).hasStatus(HttpStatus.NOT_FOUND);
     }
 
     @Test
@@ -103,10 +103,10 @@ class SalaControllerTest extends ApiTestBase {
         String id = criarSala("Sala E", 10);
         criarReserva(id, "ana", 0, 1);
 
-        var resposta = mvc.delete().uri("/salas/{id}", id);
+        var resposta = delete("/salas/{id}", id).exchange();
 
         assertThat(resposta).hasStatus(HttpStatus.CONFLICT);
         assertThat(resposta).bodyJson().extractingPath("$.detail").asString().contains("tem reservas");
-        assertThat(mvc.get().uri("/salas/{id}", id)).hasStatusOk();
+        assertThat(get("/salas/{id}", id)).hasStatusOk();
     }
 }

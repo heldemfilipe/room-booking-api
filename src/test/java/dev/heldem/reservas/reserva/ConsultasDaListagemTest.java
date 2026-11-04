@@ -61,7 +61,7 @@ class ConsultasDaListagemTest extends ApiTestBase {
     private long consultasParaListar(int tamanho) {
         estatisticas.clear();
         // exchange() uma vez só: o builder do MockMvcTester é preguiçoso e cada assertThat sobre ele chamaria a API de novo
-        var resposta = mvc.get().uri("/reservas?tamanho={t}", tamanho).exchange();
+        var resposta = get("/reservas?tamanho={t}", tamanho).exchange();
         long consultas = estatisticas.getPrepareStatementCount();
         assertThat(resposta).hasStatusOk();
         assertThat(resposta).bodyJson().extractingPath("$.itens.length()").isEqualTo(tamanho);
