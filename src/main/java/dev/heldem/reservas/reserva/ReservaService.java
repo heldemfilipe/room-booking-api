@@ -12,6 +12,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import dev.heldem.reservas.comum.AcessoNegadoException;
+import dev.heldem.reservas.comum.ConflitoException;
 import dev.heldem.reservas.comum.Datas;
 import dev.heldem.reservas.comum.EntradaInvalidaException;
 import dev.heldem.reservas.comum.Pagina;
@@ -39,14 +40,19 @@ public class ReservaService {
     }
 
     /**
-     * Nesta etapa a reserva ainda é criada SEM checar sobreposição: duas reservas da mesma sala no mesmo horário são
-     * aceitas. Isso é proposital e é a Etapa 3 (reproduzir a corrida e fechá-la), não um esquecimento.
+     * VERSÃO INGÊNUA (Etapa 3, ponto de partida): consulta se há conflito e insere se não houver. Isso é uma condição de
+     * corrida: duas transações podem consultar ao mesmo tempo, as duas não verem conflito (cada uma não enxerga o insert,
+     * ainda não confirmado, da outra) e as duas inserirem. O teste CorridaDeReservasTest reproduz o erro.
      */
     @Transactional
     public ReservaResponse criar(String usuarioId, CriarReservaRequest request) {
         Sala sala = salaService.buscar(request.salaId()); // 404 se a sala não existir
-        var reserva = new Reserva(sala, usuarioId, Datas.paraOBanco(request.inicio()),
-                Datas.paraOBanco(request.fim()), Datas.agora(clock));
+        Instant inicio = Datas.paraOBanco(request.inicio());
+        Instant fim = Datas.paraOBanco(request.fim());
+        if (repository.existeSobreposicao(sala.getId(), inicio, fim)) {
+            throw new ConflitoException("A sala '" + sala.getNome() + "' já está reservada em parte desse horário.");
+        }
+        var reserva = new Reserva(sala, usuarioId, inicio, fim, Datas.agora(clock));
         return ReservaResponse.de(repository.save(reserva));
     }
 
