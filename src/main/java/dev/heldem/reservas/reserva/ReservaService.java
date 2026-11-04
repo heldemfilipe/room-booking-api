@@ -40,13 +40,14 @@ public class ReservaService {
     }
 
     /**
-     * VERSÃO INGÊNUA (Etapa 3, ponto de partida): consulta se há conflito e insere se não houver. Isso é uma condição de
-     * corrida: duas transações podem consultar ao mesmo tempo, as duas não verem conflito (cada uma não enxerga o insert,
-     * ainda não confirmado, da outra) e as duas inserirem. O teste CorridaDeReservasTest reproduz o erro.
+     * Lock PESSIMISTA (Etapa 3, solução c): a primeira coisa que a transação faz é trancar a linha da sala
+     * (SELECT ... FOR UPDATE). As reservas da MESMA sala passam a ser feitas uma de cada vez; as de salas diferentes
+     * continuam em paralelo. Quem espera, ao ser liberado, roda a consulta de sobreposição já enxergando a reserva da
+     * transação anterior e recebe 409 com a mensagem certa (sem erro de banco nenhum).
      */
     @Transactional
     public ReservaResponse criar(String usuarioId, CriarReservaRequest request) {
-        Sala sala = salaService.buscar(request.salaId()); // 404 se a sala não existir
+        Sala sala = salaService.buscarParaReservar(request.salaId()); // 404 se a sala não existir; tranca a linha
         Instant inicio = Datas.paraOBanco(request.inicio());
         Instant fim = Datas.paraOBanco(request.fim());
         if (repository.existeSobreposicao(sala.getId(), inicio, fim)) {
