@@ -51,6 +51,8 @@ class ApiExceptionHandler extends ResponseEntityExceptionHandler {
 
     @ExceptionHandler(ConflitoException.class)
     ProblemDetail conflito(ConflitoException ex) {
+        // INFO, não WARN: 409 é uma resposta correta da regra de negócio. O JSON do log carrega o traceId desta requisição.
+        log.info("Conflito (409): {}", ex.getMessage());
         return problema(HttpStatus.CONFLICT, "Conflito", ex.getMessage());
     }
 
