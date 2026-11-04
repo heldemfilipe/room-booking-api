@@ -21,7 +21,7 @@ import org.springframework.web.cors.UrlBasedCorsConfigurationSource;
 /**
  * API stateless protegida por JWT (resource server). Regras:
  * <ul>
- *   <li>saúde ({@code /actuator/health}) é pública, para o orquestrador;</li>
+ *   <li>saúde ({@code /actuator/health}) é pública, para o orquestrador; as métricas são só do ADMIN;</li>
  *   <li>ler salas: qualquer autenticado; escrever salas: só ADMIN;</li>
  *   <li>reservas: qualquer autenticado cria e lista; cancelar exige ser o dono (regra no service, que compara o dono
  *       com o {@code sub} do token);</li>
@@ -43,6 +43,9 @@ class SegurancaConfig {
                 .sessionManagement(sessao -> sessao.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
                 .authorizeHttpRequests(regras -> regras
                         .requestMatchers("/actuator/health", "/actuator/health/**").permitAll()
+                        // métricas (inclusive as do cache): só ADMIN. O que não está exposto em
+                        // management.endpoints.web.exposure.include nem existe, e o resto cai no denyAll
+                        .requestMatchers("/actuator/metrics", "/actuator/metrics/**").hasRole("ADMIN")
                         .requestMatchers(HttpMethod.GET, "/salas", "/salas/**").authenticated()
                         .requestMatchers("/salas", "/salas/**").hasRole("ADMIN")
                         .requestMatchers("/reservas", "/reservas/**").authenticated()

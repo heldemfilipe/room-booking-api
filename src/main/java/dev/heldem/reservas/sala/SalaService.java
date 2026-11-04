@@ -4,16 +4,20 @@ import java.time.Clock;
 import java.util.List;
 import java.util.UUID;
 
+import org.springframework.cache.annotation.CacheEvict;
+import org.springframework.cache.annotation.Cacheable;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.data.domain.Sort;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import dev.heldem.reservas.cache.CacheConfig;
 import dev.heldem.reservas.comum.ConflitoException;
 import dev.heldem.reservas.comum.Datas;
 import dev.heldem.reservas.comum.RecursoNaoEncontradoException;
 import dev.heldem.reservas.reserva.ReservaRepository;
 import dev.heldem.reservas.sala.dto.SalaRequest;
+import dev.heldem.reservas.sala.dto.SalaResponse;
 
 @Service
 public class SalaService {
@@ -28,6 +32,7 @@ public class SalaService {
         this.clock = clock;
     }
 
+    @CacheEvict(cacheNames = CacheConfig.SALAS, allEntries = true)
     @Transactional
     public Sala criar(SalaRequest request) {
         String nome = request.nome().strip();
@@ -43,9 +48,14 @@ public class SalaService {
         }
     }
 
+    /**
+     * A listagem de salas vem do cache (Redis, TTL de 5 minutos). Guarda o DTO, e não a entidade JPA. As escritas abaixo
+     * esvaziam o cache; uma alteração feita direto no banco só aparece quando o TTL vence. As reservas não são cacheadas.
+     */
+    @Cacheable(cacheNames = CacheConfig.SALAS)
     @Transactional(readOnly = true)
-    public List<Sala> listar() {
-        return repository.findAll(Sort.by("nome", "id"));
+    public List<SalaResponse> listar() {
+        return repository.findAll(Sort.by("nome", "id")).stream().map(SalaResponse::de).toList();
     }
 
     @Transactional(readOnly = true)
@@ -61,6 +71,7 @@ public class SalaService {
                 .orElseThrow(() -> new RecursoNaoEncontradoException("Sala " + id + " não encontrada."));
     }
 
+    @CacheEvict(cacheNames = CacheConfig.SALAS, allEntries = true)
     @Transactional
     public Sala atualizar(UUID id, SalaRequest request) {
         Sala sala = buscar(id);
@@ -76,6 +87,7 @@ public class SalaService {
         }
     }
 
+    @CacheEvict(cacheNames = CacheConfig.SALAS, allEntries = true)
     @Transactional
     public void remover(UUID id) {
         Sala sala = buscar(id);

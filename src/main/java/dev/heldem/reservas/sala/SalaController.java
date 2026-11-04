@@ -38,7 +38,7 @@ public class SalaController {
 
     @GetMapping
     public List<SalaResponse> listar() {
-        return service.listar().stream().map(SalaResponse::de).toList();
+        return service.listar();
     }
 
     @GetMapping("/{id}")
