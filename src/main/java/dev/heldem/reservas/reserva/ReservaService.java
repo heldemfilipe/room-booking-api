@@ -1,8 +1,12 @@
 package dev.heldem.reservas.reserva;
 
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.sql.SQLException;
 import java.time.Clock;
 import java.time.Instant;
+import java.util.HexFormat;
 import java.util.UUID;
 
 import org.springframework.dao.DataAccessException;
@@ -14,12 +18,15 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import dev.heldem.reservas.comum.AcessoNegadoException;
+import dev.heldem.reservas.comum.ChaveReutilizadaException;
 import dev.heldem.reservas.comum.ConflitoException;
 import dev.heldem.reservas.comum.Datas;
 import dev.heldem.reservas.comum.EntradaInvalidaException;
 import dev.heldem.reservas.comum.Pagina;
 import dev.heldem.reservas.comum.RecursoNaoEncontradoException;
 import dev.heldem.reservas.reserva.dto.CriarReservaRequest;
+import dev.heldem.reservas.reserva.idempotencia.ChaveIdempotencia;
+import dev.heldem.reservas.reserva.idempotencia.ChaveIdempotenciaRepository;
 import dev.heldem.reservas.reserva.dto.ReservaResponse;
 import dev.heldem.reservas.sala.Sala;
 import dev.heldem.reservas.sala.SalaService;
@@ -35,14 +42,75 @@ public class ReservaService {
     // lista estável: por início, com o id como desempate
     private static final Sort ORDEM = Sort.by("inicio", "id");
 
+    private static final int TAMANHO_MAXIMO_DA_CHAVE = 100;
+
     private final ReservaRepository repository;
+    private final ChaveIdempotenciaRepository chaves;
     private final SalaService salaService;
     private final Clock clock;
 
-    public ReservaService(ReservaRepository repository, SalaService salaService, Clock clock) {
+    public ReservaService(ReservaRepository repository, ChaveIdempotenciaRepository chaves, SalaService salaService,
+            Clock clock) {
         this.repository = repository;
+        this.chaves = chaves;
         this.salaService = salaService;
         this.clock = clock;
+    }
+
+    /** A reserva criada e se ela veio de um replay da mesma Idempotency-Key (então nada novo foi gravado). */
+    public record ResultadoCriacao(ReservaResponse reserva, boolean repetida) {
+    }
+
+    /**
+     * POST /reservas com a chave de idempotência opcional. Sem chave, é a criação normal. Com chave:
+     * <ol>
+     *   <li>a chave é registrada PRIMEIRO, na mesma transação, com ON CONFLICT DO NOTHING: duas requisições simultâneas
+     *       com a mesma chave não passam juntas, porque a segunda espera a primeira confirmar;</li>
+     *   <li>se a chave já existia e o corpo é o mesmo, devolve a reserva criada antes (replay), sem gravar nada;</li>
+     *   <li>se existia com outro corpo, 422;</li>
+     *   <li>se a criação falha (409, 404...), a transação desfaz tudo, inclusive a chave: só respostas de sucesso são
+     *       memorizadas, e o cliente pode tentar de novo com a mesma chave.</li>
+     * </ol>
+     */
+    @Transactional
+    public ResultadoCriacao criar(String usuarioId, String chave, CriarReservaRequest request) {
+        if (chave == null) {
+            return new ResultadoCriacao(criar(usuarioId, request), false);
+        }
+        if (chave.isBlank() || chave.length() > TAMANHO_MAXIMO_DA_CHAVE) {
+            throw new EntradaInvalidaException(
+                    "Idempotency-Key deve ter de 1 a " + TAMANHO_MAXIMO_DA_CHAVE + " caracteres.");
+        }
+        String hash = hashDa(request);
+        int criadas = chaves.inserirSeAusente(UUID.randomUUID(), usuarioId, chave, hash, Datas.agora(clock));
+        if (criadas == 0) {
+            ChaveIdempotencia existente = chaves.findByUsuarioIdAndChave(usuarioId, chave).orElseThrow();
+            if (!existente.getHashRequisicao().equals(hash)) {
+                throw new ChaveReutilizadaException();
+            }
+            if (existente.getReservaId() == null) {
+                // Não deveria existir: a chave e a reserva são gravadas na mesma transação. Se aparecer (por exemplo, uma
+                // linha mexida à mão), é melhor um 409 claro do que um erro de servidor.
+                throw new ConflitoException("A requisição com esta Idempotency-Key não terminou. Tente de novo.");
+            }
+            // Devolve a reserva como ela está agora (se foi cancelada depois, o replay mostra CANCELADA).
+            return new ResultadoCriacao(buscar(existente.getReservaId()), true);
+        }
+        ReservaResponse criada = criar(usuarioId, request);
+        chaves.definirReserva(usuarioId, chave, criada.id());
+        return new ResultadoCriacao(criada, false);
+    }
+
+    /** SHA-256 (hex) do que identifica a requisição: sala, início e fim, já na precisão do banco. */
+    private static String hashDa(CriarReservaRequest request) {
+        String conteudo = request.salaId() + "|" + Datas.paraOBanco(request.inicio()) + "|"
+                + Datas.paraOBanco(request.fim());
+        try {
+            byte[] resumo = MessageDigest.getInstance("SHA-256").digest(conteudo.getBytes(StandardCharsets.UTF_8));
+            return HexFormat.of().formatHex(resumo);
+        } catch (NoSuchAlgorithmException ex) {
+            throw new IllegalStateException("SHA-256 não está disponível", ex);
+        }
     }
 
     /**

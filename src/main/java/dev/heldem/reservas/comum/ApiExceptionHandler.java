@@ -44,6 +44,11 @@ class ApiExceptionHandler extends ResponseEntityExceptionHandler {
         return problema(HttpStatus.FORBIDDEN, "Acesso negado", ex.getMessage());
     }
 
+    @ExceptionHandler(ChaveReutilizadaException.class)
+    ProblemDetail chaveReutilizada(ChaveReutilizadaException ex) {
+        return problema(HttpStatus.UNPROCESSABLE_ENTITY, "Idempotency-Key reutilizada", ex.getMessage());
+    }
+
     @ExceptionHandler(ConflitoException.class)
     ProblemDetail conflito(ConflitoException ex) {
         return problema(HttpStatus.CONFLICT, "Conflito", ex.getMessage());

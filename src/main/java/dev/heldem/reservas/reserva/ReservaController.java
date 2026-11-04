@@ -13,6 +13,7 @@ import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
@@ -36,12 +37,20 @@ public class ReservaController {
     }
 
     // O dono é o "sub" do token validado, nunca algo que o cliente escreve no corpo.
+    // Idempotency-Key (opcional): repetir a mesma chave com o mesmo corpo devolve a MESMA resposta (201 e a mesma
+    // reserva), com o cabeçalho Idempotency-Replayed: true, sem criar outra reserva.
     @PostMapping
     public ResponseEntity<ReservaResponse> criar(@AuthenticationPrincipal Jwt token,
+            @RequestHeader(value = "Idempotency-Key", required = false) String chave,
             @Valid @RequestBody CriarReservaRequest request) {
-        ReservaResponse criada = service.criar(token.getSubject(), request);
+        var resultado = service.criar(token.getSubject(), chave, request);
+        ReservaResponse criada = resultado.reserva();
         URI local = ServletUriComponentsBuilder.fromCurrentRequest().path("/{id}").buildAndExpand(criada.id()).toUri();
-        return ResponseEntity.created(local).body(criada);
+        var resposta = ResponseEntity.created(local);
+        if (resultado.repetida()) {
+            resposta.header("Idempotency-Replayed", "true");
+        }
+        return resposta.body(criada);
     }
 
     // existe para o Location do POST apontar para algo que responde
