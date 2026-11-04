@@ -5,8 +5,8 @@
 API de reservas de salas por horário, com Spring Boot e PostgreSQL: impede que duas pessoas ocupem o mesmo intervalo,
 autentica com Keycloak, faz cache em Redis e expõe métricas no Grafana. Tudo roda local com Docker Compose.
 
-> **Status:** projeto de estudo, em construção. Prontos: o modelo relacional, o CRUD e a autenticação com autorização
-> (Etapas 0 a 2). **A API ainda aceita duas reservas no mesmo horário**: isso é de propósito e é o assunto da Etapa 3.
+> **Status:** projeto de estudo, em construção. Prontos: o modelo relacional, o CRUD, a autenticação com autorização e a
+> proteção contra reserva dupla, com a corrida medida (Etapas 0 a 3). Faltam o cache, a observabilidade e a entrega.
 > O que não existe está marcado como "a fazer".
 
 ## Problema
@@ -104,7 +104,7 @@ necessário, os testes usam tokens assinados com uma chave de teste):
 | `GET /salas/{id}` | Busca uma sala |
 | `PUT /salas/{id}` | Atualiza nome e capacidade |
 | `DELETE /salas/{id}` | Remove a sala; `409` se ela tem reservas |
-| `POST /reservas` | Cria uma reserva `ATIVA` em nome do **usuário do token** (`201` com `Location`); `404` se a sala não existe, `400` se `fim` não é depois de `inicio` |
+| `POST /reservas` | Cria uma reserva `ATIVA` em nome do **usuário do token** (`201` com `Location`); `404` se a sala não existe, `400` se `fim` não é depois de `inicio`, **`409` se o horário já está ocupado**. Aceita `Idempotency-Key` (veja Experimentos) |
 | `GET /reservas/{id}` | Busca uma reserva |
 | `GET /reservas?salaId=&de=&ate=&pagina=&tamanho=` | Reservas que se sobrepõem a `[de, ate)`, da sala informada; todos os filtros são opcionais; `pagina` ≥ 0 (padrão 0) e `tamanho` de 1 a 100 (padrão 20); ordem por início |
 | `DELETE /reservas/{id}` | **Cancela** (muda o status para `CANCELADA`, `204`); só o dono (`403` para os outros); cancelar de novo também dá `204` |
@@ -188,7 +188,13 @@ Keycloak roda em modo de desenvolvimento (sem HTTPS, banco embutido).
 | PostgreSQL com Flyway e `ddl-auto=validate` | O schema fica revisável no Git, e o `validate` impede que entidade e SQL divirjam sem alguém notar. O custo é manter o schema em dois lugares; o `MigracoesTest` e o contexto dos testes (que valida contra um PostgreSQL real) pegam a divergência |
 | Regras no banco, além da validação da API: `CHECK (fim > inicio)`, status válido, capacidade > 0, chaves estrangeiras | A API valida e devolve `400` com o campo, mas só o banco garante a regra para qualquer cliente. O `MigracoesTest` prova que o banco recusa, sem passar pela API |
 | `DELETE /reservas/{id}` cancela (status `CANCELADA`) em vez de apagar a linha | O histórico importa, e a concorrência da Etapa 3 trata reservas ativas. Cancelar é idempotente (`204` de novo) |
-| Reserva sem checar sobreposição **nesta etapa** | É a Etapa 3: primeiro a versão ingênua, depois o teste que reproduz a corrida, depois três correções comparadas. Um teste documenta o comportamento atual e será trocado |
+| Reserva dupla: **exclusion constraint do PostgreSQL + lock pessimista na sala** | A constraint é a garantia (vale para qualquer escritor); o lock é a fila que evita a cauda de deadlocks da constraint sob disputa. Medido, com as três soluções e a hipótese do otimista, em Experimentos |
+| A consulta de sobreposição continua, mesmo com a constraint | Dá o `409` claro no caso comum sem um erro de banco; a constraint fecha o que a consulta não enxerga |
+| Violação da constraint (`23P01`) e deadlock (`40P01`) viram `409`, nunca `500` | São conflitos de concorrência, não erros do servidor; o `40P01` foi um achado do experimento |
+| Lock otimista: a perdedora vira `409` (sem retentativa automática) | Uma retentativa transformaria o `409` genérico no `409` "sala ocupada", mas custa mais uma ida ao banco; o cliente já sabe tentar de novo |
+| `Idempotency-Key` opcional, por usuário, só respostas de sucesso memorizadas | Quem não manda a chave continua funcionando (e leva `409` se repetir); a falha não pode consumir a chave, senão o cliente nunca conseguiria tentar de novo |
+| Pool de 50 conexões só nos testes de concorrência | Para 50 clientes disputarem de verdade; com o padrão de 10, as outras esperariam por conexão |
+| Um só PostgreSQL nos testes, em vez de um por contexto do Spring | Cada contexto com propriedades diferentes subia o seu contêiner; um compartilhado cortou o tempo (o `MigracoesTest` foi de uns 8 s para uns 0,8 s) |
 | Intervalos que só se tocam (fim == início) não se sobrepõem | Reservar das 10h às 11h e das 11h às 12h é válido; o filtro por período usa `fim > de` e `inicio < ate` |
 | `usuarioId` no corpo do `POST /reservas` (Etapa 1) | Era provisório, sem autenticação. **Removido na Etapa 2:** o dono vem do `sub` do token |
 | Ids `UUID` gerados pela aplicação | Não revelam a quantidade de registros e não dependem de sequência do banco |
@@ -237,6 +243,110 @@ de `GET /reservas?tamanho=50`. Contei também o SQL (`logging.level.org.hibernat
 
 As Etapas 3, 4 e 5 acrescentam as tabelas de experimento de concorrência, de cache e de observabilidade.
 
+### Corrida da reserva dupla (Etapa 3)
+
+**O problema.** "Consultar se há conflito e inserir" tem uma janela: duas transações consultam ao mesmo tempo, nenhuma
+enxerga o `INSERT` ainda não confirmado da outra, e as duas inserem. Em `READ COMMITTED` (o padrão do PostgreSQL) isso
+acontece.
+
+**Como foi medido.** `CorridaDeReservasTest`: 50 clientes, cada um com o seu usuário e o seu token, largam juntos (um
+`CountDownLatch` serve de portão) para reservar a **mesma sala no mesmo horário** (10h-11h), passando por toda a cadeia de
+filtros. Dez rodadas com sala nova a cada uma, mais uma rodada de aquecimento que não entra na conta. A verdade do
+resultado é o que ficou **gravado no banco** (`ativasNoBanco`), e não só os códigos HTTP. Pool de 50 conexões (o padrão do
+Hikari, 10, faria as outras requisições esperarem por conexão e esconderia a disputa). PostgreSQL 17 no Testcontainers,
+na mesma máquina da API. Máquina: Windows 11, 12 CPUs lógicas, 16 GB para o Docker Desktop. Cada linha é uma branch,
+medida com o **mesmo teste** (`./mvnw clean test -Dtest='CorridaDeReservasTest#medir' -Dexperimento=true`). Onde há duas
+medições, as duas estão listadas, para mostrar a variação.
+
+| Solução | Criadas por rodada (mín/máx/média) | Gravadas no banco | `409` (média) | `500` | Latência por requisição, ms (p50 / p95 / máx) |
+|---|---|---|---|---|---|
+| Ingênua (consulta e insere) | 2 / 8 / **4,2** | 2 a 8: as mesmas | 45,8 | 0 | 19 / 53 / 67 |
+| (a) Exclusion constraint | 1 / 1 / 1 | 1 | 49 | 0 | 17 / **23.030** / 46.043<br>26 / **39.060** / 47.064 |
+| (b) Lock otimista (`@Version` na sala) | 1 / 1 / 1 | 1 | 49 | 0 | 16 / 50 / 64<br>20 / 49 / 60 |
+| (c) Lock pessimista (`FOR UPDATE` na sala) | 1 / 1 / 1 | 1 | 49 | 0 | 46 / 88 / 114<br>47 / 89 / 117 |
+| **Adotada: (c) + (a)** | 1 / 1 / 1 | 1 | 49 | 0 | 51 / 96 / 115<br>57 / 100 / 117 |
+| (b) + (a), só para checar uma hipótese | 1 / 1 / 1 | 1 | 49 | 0 | 21 / **37.010** / 48.033<br>25 / **40.027** / 47.053 |
+
+**O que cada linha mostra:**
+
+- **Ingênua:** em **todas as dez rodadas** houve reserva duplicada (de 2 a 8 reservas ativas no mesmo horário). O banco
+  confirma os mesmos números das respostas `201`. Sem esse teste, as correções não provariam nada.
+- **(a) Exclusion constraint** (`EXCLUDE USING gist (sala_id WITH =, tstzrange(inicio, fim, '[)') WITH &&) WHERE (status =
+  'ATIVA')`, com `btree_gist`): **correta**, e é a garantia mais forte, porque vale para qualquer escritor, até SQL
+  direto (o `RestricaoDeExclusaoTest` insere 50 linhas em SQL puro e só uma entra). Mas, sob disputa pesada pelo **mesmo**
+  horário, o PostgreSQL deixa transações esperando umas pelas outras no índice e as derruba com `deadlock detected`
+  (SQLState `40P01`) depois do `deadlock_timeout` (1 s), em cascata: a cauda foi de **23 a 39 s no p95 e 47 s no máximo**.
+  Isso apareceu de surpresa: na primeira execução, 49 requisições de uma rodada viraram `500`, porque eu só traduzia o
+  `23P01` (violação da constraint) em `409`. Agora o `40P01` também vira `409`.
+- **(b) Lock otimista:** a versão precisa morar na **sala**, e não na reserva: numa corrida de *inserção* não há linha de
+  reserva para versionar. Cada reserva nova força o incremento da versão da sala (`OPTIMISTIC_FORCE_INCREMENT`); duas
+  transações que leram a mesma versão disputam o `UPDATE ... WHERE versao = ?` e só uma vence. A perdedora recebe
+  `ObjectOptimisticLockingFailureException`, traduzida em `409`. **Foi a mais rápida** (p95 de 49 a 50 ms). O custo: as
+  perdedoras fazem o trabalho todo e só descobrem no commit; e só protege quem passa pelo código que sobe a versão (um
+  `INSERT` direto no banco ignora).
+- **(c) Lock pessimista:** a transação tranca a linha da sala antes de tudo. As reservas da mesma sala viram uma fila; as
+  de salas diferentes seguem em paralelo. Quem espera, ao ser liberado, roda a consulta de sobreposição já enxergando a
+  reserva da frente e recebe um `409` com a mensagem certa, sem erro de banco. A latência é a da fila (~2 ms por transação
+  × 50): p95 de 88 a 89 ms, **sem cauda**. O custo: quem espera segura uma conexão do pool, e não há limite de espera
+  configurado (em produção, `lock_timeout` no PostgreSQL).
+- **Adotada, (c) + (a):** o lock serializa as reservas da sala, então a constraint nunca disputa e não há deadlock; a
+  constraint continua lá como a garantia que não depende do código. Custo medido sobre o lock sozinho: uns 5 a 10 ms de
+  mediana (o índice GiST).
+- **(b) + (a), medida só para testar uma hipótese:** a ideia de usar o lock otimista com a constraint parecia boa (o
+  otimista é o mais rápido). Mas como no otimista todas as transações inserem ao mesmo tempo e só descobrem no commit, elas
+  voltam a disputar o índice da constraint, e **a cauda de deadlocks volta** (p95 de 37 a 40 s). Hipótese confirmada.
+  Essa combinação ficou só nesta medição, em uma branch descartada.
+
+**Recomendação escrita.** Use **a constraint como a garantia e o lock pessimista como a fila**:
+
+1. A **exclusion constraint** é o que impede a reserva dupla de verdade: vale para qualquer escritor e sobrevive a um
+   bug futuro ou a um `INSERT` manual. Nenhuma das duas soluções de lock oferece isso.
+2. O **lock pessimista na sala** evita o custo da constraint sob disputa: sem ele, a cauda de segundos dos deadlocks. É a
+   solução com latência previsível e com a mensagem de erro certa para quem perde.
+3. O **lock otimista** é a mais rápida e seria a escolha para baixa contenção sem constraint, mas **não** combina com a
+   constraint (medido acima) e, sozinha, só protege o código que a usa.
+4. **Contexto importante:** 50 clientes no mesmo horário de uma mesma sala é o pior caso, de propósito. Com contenção
+   normal (duas ou três pessoas), a consulta de sobreposição deve pegar quase todos os conflitos antes do banco, e a
+   constraint sozinha provavelmente bastaria, mas **eu não medi cenários de baixa contenção**. O lock e a constraint
+   juntos pagam um custo pequeno e fixo (uns 5 a 10 ms de mediana, medido) para o pior caso não existir.
+
+**Limites deste experimento:** uma única máquina, o PostgreSQL no Docker na mesma máquina (sem latência de rede), um só
+cenário de disputa (todos no mesmo horário), dez rodadas por solução. Os números mostram a **forma** do comportamento
+(a cauda de deadlocks, a fila), não um desempenho de produção. Os tempos variam entre execuções, por isso as duas medições.
+
+**Onde estão as soluções.** A `main` tem a adotada. As outras ficam em branches para reproduzir a medição:
+`etapa-3-exclusion-constraint` (já mesclada), `etapa-3-lock-otimista` e `etapa-3-lock-pessimista`. Ao trocar de branch,
+rode `./mvnw clean ...`: o `target/classes` guarda a migration `V3` da branch anterior, e o Flyway recusa duas `V3`.
+
+### Repetição do cliente: Idempotency-Key (Etapa 3)
+
+`POST /reservas` aceita o cabeçalho opcional `Idempotency-Key` (1 a 100 caracteres). Repetir a mesma chave com o mesmo
+corpo (um clique duplo, uma retentativa depois de um timeout) devolve **a mesma reserva**, sem criar outra, com o
+cabeçalho `Idempotency-Replayed: true`. A chave vale **por usuário**.
+
+Como funciona: a chave é inserida **primeiro**, na mesma transação da reserva, com `ON CONFLICT DO NOTHING`, numa tabela
+`chaves_idempotencia` com `UNIQUE (usuario_id, chave)`. O índice único serializa duas requisições simultâneas com a mesma
+chave: a segunda espera a primeira confirmar e então devolve a resposta dela. Se a criação falha (`409`, `404`...), a
+transação desfaz tudo, inclusive a chave: **só respostas de sucesso são memorizadas**, e o cliente pode tentar de novo.
+
+| Cenário | Resultado observado |
+|---|---|
+| A mesma chave duas vezes, em sequência | Duas respostas `201` com o mesmo `Location`; a segunda traz `Idempotency-Replayed: true`; uma só reserva |
+| **50 requisições simultâneas** com a mesma chave | 1 criou, **49 replays**, nenhuma outra resposta; todas apontam para a **mesma** reserva; 1 linha de reserva e 1 de chave no banco |
+| A mesma chave com outro horário | `422` (`Idempotency-Key reutilizada`): é erro do cliente, não replay |
+| A mesma chave de dois usuários | Independentes: as duas criam |
+| Primeira tentativa falha com `409`; depois o horário é liberado | A mesma chave cria normalmente (a falha não consumiu a chave) |
+| Sem a chave, o cliente repete | A segunda dá `409` (a primeira já ocupa o horário) |
+| Chave vazia ou com mais de 100 caracteres | `400` |
+
+Na prática, com a API real e o Keycloak: dez `curl` em paralelo no mesmo horário (cinco da `ana`, cinco da `bia`) deram
+**1 `201` e 9 `409`**, e o banco ficou com 1 reserva ativa; a mesma chave enviada duas vezes devolveu o mesmo `Location`
+na segunda, com `Idempotency-Replayed: true`.
+
+**Limitações:** as chaves nunca expiram (falta um job de limpeza por idade); o replay devolve a reserva **como ela está
+agora** (se foi cancelada depois, mostra `CANCELADA`), e não uma cópia congelada da primeira resposta; a identidade da
+requisição é sala, início e fim.
+
 ## Custo
 
 **Zero.** Tudo roda na máquina local com Docker; nada é aplicado na AWS. A parte opcional do roteiro que subiria a API
@@ -247,7 +357,7 @@ no ECS não será feita.
 - [x] Etapa 0: repositório, projeto gerado e CI
 - [x] Etapa 1: modelo relacional, Flyway e CRUD (migrations, CRUD de salas e reservas, N+1 medido e corrigido)
 - [x] Etapa 2: autenticação e autorização (Keycloak, JWT, papéis, regra de dono, 401 e 403 testados)
-- [ ] Etapa 3: concorrência e reserva dupla
+- [x] Etapa 3: concorrência e reserva dupla (corrida reproduzida e medida, três soluções comparadas, 409, idempotência)
 - [ ] Etapa 4: cache com Redis
 - [ ] Etapa 5: observabilidade
 - [ ] Etapa 6: entrega
