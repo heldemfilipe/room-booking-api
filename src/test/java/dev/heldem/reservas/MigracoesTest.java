@@ -48,7 +48,7 @@ class MigracoesTest {
         var versoes = jdbc.queryForList(
                 "select version from flyway_schema_history where success order by installed_rank", String.class);
 
-        assertThat(versoes).containsExactly("1", "2", "3");
+        assertThat(versoes).containsExactly("1", "2", "3", "4");
     }
 
     @Test

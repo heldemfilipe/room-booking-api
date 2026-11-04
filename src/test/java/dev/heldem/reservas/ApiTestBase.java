@@ -87,6 +87,16 @@ public abstract class ApiTestBase {
                 .contentType(MediaType.APPLICATION_JSON).content(json).exchange();
     }
 
+    /** Reserva com Idempotency-Key, em nome do usuário informado (papel USER). */
+    protected MvcTestResult reservarComChave(String salaId, String usuario, String chave, int horaInicio, int horaFim) {
+        var requisicao = mvc.post().uri("/reservas")
+                .header(HttpHeaders.AUTHORIZATION, bearer(TokensDeTeste.token(usuario, "USER")))
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("{\"salaId\":\"" + salaId + "\",\"inicio\":\"" + BASE.plusSeconds(horaInicio * 3600L)
+                        + "\",\"fim\":\"" + BASE.plusSeconds(horaFim * 3600L) + "\"}");
+        return (chave == null ? requisicao : requisicao.header("Idempotency-Key", chave)).exchange();
+    }
+
     protected MvcTestResult deleteComToken(String token, String uri, Object... variaveis) {
         return mvc.delete().uri(uri, variaveis).header(HttpHeaders.AUTHORIZATION, bearer(token)).exchange();
     }
