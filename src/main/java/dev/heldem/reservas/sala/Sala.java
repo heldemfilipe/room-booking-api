@@ -9,6 +9,7 @@ import jakarta.persistence.GeneratedValue;
 import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
 import jakarta.persistence.Table;
+import jakarta.persistence.Version;
 
 @Entity
 @Table(name = "salas")
@@ -26,6 +27,11 @@ public class Sala {
 
     @Column(name = "criada_em", nullable = false, updatable = false)
     private Instant criadaEm;
+
+    // Lock otimista (Etapa 3, solução b): a versão da sala sobe a cada reserva nova; veja ReservaService.criar
+    @Version
+    @Column(name = "versao", nullable = false)
+    private long versao;
 
     protected Sala() {
         // exigido pelo JPA

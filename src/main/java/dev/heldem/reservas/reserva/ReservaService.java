@@ -40,13 +40,13 @@ public class ReservaService {
     }
 
     /**
-     * VERSÃO INGÊNUA (Etapa 3, ponto de partida): consulta se há conflito e insere se não houver. Isso é uma condição de
-     * corrida: duas transações podem consultar ao mesmo tempo, as duas não verem conflito (cada uma não enxerga o insert,
-     * ainda não confirmado, da outra) e as duas inserirem. O teste CorridaDeReservasTest reproduz o erro.
+     * Lock OTIMISTA (Etapa 3, solução b): a consulta de sobreposição continua, mas a sala é carregada com a versão
+     * marcada para subir no commit. Duas transações que leram a mesma versão e passaram na consulta disputam o UPDATE
+     * da versão; a perdedora recebe ObjectOptimisticLockingFailureException, que a API traduz em 409.
      */
     @Transactional
     public ReservaResponse criar(String usuarioId, CriarReservaRequest request) {
-        Sala sala = salaService.buscar(request.salaId()); // 404 se a sala não existir
+        Sala sala = salaService.buscarParaReservar(request.salaId()); // 404 se a sala não existir
         Instant inicio = Datas.paraOBanco(request.inicio());
         Instant fim = Datas.paraOBanco(request.fim());
         if (repository.existeSobreposicao(sala.getId(), inicio, fim)) {

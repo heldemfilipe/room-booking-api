@@ -6,6 +6,7 @@ import java.util.Map;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.TypeMismatchException;
+import org.springframework.orm.ObjectOptimisticLockingFailureException;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.HttpStatusCode;
@@ -42,6 +43,14 @@ class ApiExceptionHandler extends ResponseEntityExceptionHandler {
     @ExceptionHandler(AcessoNegadoException.class)
     ProblemDetail acessoNegado(AcessoNegadoException ex) {
         return problema(HttpStatus.FORBIDDEN, "Acesso negado", ex.getMessage());
+    }
+
+    // Lock otimista: outra transação confirmou uma reserva da mesma sala entre a leitura e o commit desta. É um conflito
+    // de concorrência, e não um erro do servidor; o cliente consulta a disponibilidade e tenta de novo.
+    @ExceptionHandler(ObjectOptimisticLockingFailureException.class)
+    ProblemDetail conflitoDeVersao(ObjectOptimisticLockingFailureException ex) {
+        return problema(HttpStatus.CONFLICT, "Conflito",
+                "Outra reserva desta sala foi confirmada ao mesmo tempo. Consulte a disponibilidade e tente de novo.");
     }
 
     @ExceptionHandler(ConflitoException.class)
