@@ -1,0 +1,22 @@
+# PostgreSQL para o desenvolvimento local: docker compose up -d db
+# A senha abaixo é SÓ para desenvolvimento local. Não use estes valores em nenhum outro ambiente.
+# (Keycloak, Redis, Prometheus e Grafana entram nas Etapas 2, 4 e 5.)
+services:
+  db:
+    image: postgres:17
+    environment:
+      POSTGRES_DB: reservas
+      POSTGRES_USER: reservas
+      POSTGRES_PASSWORD: reservas
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U reservas -d reservas"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  pgdata:
