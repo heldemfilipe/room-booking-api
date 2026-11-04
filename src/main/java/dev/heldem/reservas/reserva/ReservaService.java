@@ -11,6 +11,7 @@ import org.springframework.data.jpa.domain.Specification;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import dev.heldem.reservas.comum.AcessoNegadoException;
 import dev.heldem.reservas.comum.Datas;
 import dev.heldem.reservas.comum.EntradaInvalidaException;
 import dev.heldem.reservas.comum.Pagina;
@@ -42,9 +43,9 @@ public class ReservaService {
      * aceitas. Isso é proposital e é a Etapa 3 (reproduzir a corrida e fechá-la), não um esquecimento.
      */
     @Transactional
-    public ReservaResponse criar(CriarReservaRequest request) {
+    public ReservaResponse criar(String usuarioId, CriarReservaRequest request) {
         Sala sala = salaService.buscar(request.salaId()); // 404 se a sala não existir
-        var reserva = new Reserva(sala, request.usuarioId().strip(), Datas.paraOBanco(request.inicio()),
+        var reserva = new Reserva(sala, usuarioId, Datas.paraOBanco(request.inicio()),
                 Datas.paraOBanco(request.fim()), Datas.agora(clock));
         return ReservaResponse.de(repository.save(reserva));
     }
@@ -66,10 +67,17 @@ public class ReservaService {
         return Pagina.de(resultado, ReservaResponse::de);
     }
 
-    /** DELETE /reservas/{id}: cancela (muda o status) e é idempotente. */
+    /**
+     * DELETE /reservas/{id}: cancela (muda o status) e é idempotente. Só quem criou a reserva cancela: o dono vem do
+     * token (nunca do corpo ou do caminho) e é comparado com o da reserva; ADMIN não é exceção (docs: Decisões).
+     */
     @Transactional
-    public void cancelar(UUID id) {
-        obter(id).cancelar();
+    public void cancelar(UUID id, String usuarioId) {
+        Reserva reserva = obter(id); // 404 antes de 403
+        if (!reserva.getUsuarioId().equals(usuarioId)) {
+            throw new AcessoNegadoException("Só quem criou a reserva pode cancelá-la.");
+        }
+        reserva.cancelar();
     }
 
     private Reserva obter(UUID id) {

@@ -4,17 +4,14 @@ import java.time.Instant;
 import java.util.UUID;
 
 import jakarta.validation.constraints.AssertTrue;
-import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
-import jakarta.validation.constraints.Size;
 
 /**
- * O {@code usuarioId} vem no corpo SÓ nesta etapa, enquanto a API não tem autenticação. Na Etapa 2 ele passa a vir do
- * token (o "sub" do JWT), nunca do corpo da requisição.
+ * O dono da reserva NÃO vem no corpo: é o {@code sub} do token (veja ReservaController). Um {@code usuarioId} enviado no
+ * corpo é simplesmente ignorado, então ninguém consegue reservar em nome de outra pessoa.
  */
 public record CriarReservaRequest(
         @NotNull UUID salaId,
-        @NotBlank @Size(max = 64) String usuarioId,
         @NotNull Instant inicio,
         @NotNull Instant fim) {
 

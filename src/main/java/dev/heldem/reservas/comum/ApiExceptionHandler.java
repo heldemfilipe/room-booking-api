@@ -20,7 +20,10 @@ import org.springframework.web.method.annotation.HandlerMethodValidationExceptio
 import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
 import org.springframework.web.servlet.mvc.method.annotation.ResponseEntityExceptionHandler;
 
-/** Respostas de erro padronizadas (ProblemDetail, RFC 9457): 400 entrada inválida, 404, 409 e 500 sem stack trace. */
+/**
+ * Respostas de erro padronizadas (ProblemDetail, RFC 9457): 400 entrada inválida, 403 reserva de outra pessoa, 404, 409 e
+ * 500 sem stack trace. O 401 e o 403 de papel acontecem nos filtros de segurança (veja RespostasDeSeguranca).
+ */
 @RestControllerAdvice
 class ApiExceptionHandler extends ResponseEntityExceptionHandler {
 
@@ -34,6 +37,11 @@ class ApiExceptionHandler extends ResponseEntityExceptionHandler {
     @ExceptionHandler(EntradaInvalidaException.class)
     ProblemDetail entradaInvalida(EntradaInvalidaException ex) {
         return problema(HttpStatus.BAD_REQUEST, "Entrada inválida", ex.getMessage());
+    }
+
+    @ExceptionHandler(AcessoNegadoException.class)
+    ProblemDetail acessoNegado(AcessoNegadoException ex) {
+        return problema(HttpStatus.FORBIDDEN, "Acesso negado", ex.getMessage());
     }
 
     @ExceptionHandler(ConflitoException.class)

@@ -6,6 +6,8 @@ import java.util.UUID;
 
 import org.springframework.format.annotation.DateTimeFormat;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.core.annotation.AuthenticationPrincipal;
+import org.springframework.security.oauth2.jwt.Jwt;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -33,9 +35,11 @@ public class ReservaController {
         this.service = service;
     }
 
+    // O dono é o "sub" do token validado, nunca algo que o cliente escreve no corpo.
     @PostMapping
-    public ResponseEntity<ReservaResponse> criar(@Valid @RequestBody CriarReservaRequest request) {
-        ReservaResponse criada = service.criar(request);
+    public ResponseEntity<ReservaResponse> criar(@AuthenticationPrincipal Jwt token,
+            @Valid @RequestBody CriarReservaRequest request) {
+        ReservaResponse criada = service.criar(token.getSubject(), request);
         URI local = ServletUriComponentsBuilder.fromCurrentRequest().path("/{id}").buildAndExpand(criada.id()).toUri();
         return ResponseEntity.created(local).body(criada);
     }
@@ -58,8 +62,8 @@ public class ReservaController {
     }
 
     @DeleteMapping("/{id}")
-    public ResponseEntity<Void> cancelar(@PathVariable UUID id) {
-        service.cancelar(id);
+    public ResponseEntity<Void> cancelar(@PathVariable UUID id, @AuthenticationPrincipal Jwt token) {
+        service.cancelar(id, token.getSubject());
         return ResponseEntity.noContent().build();
     }
 }
