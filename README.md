@@ -6,7 +6,8 @@ API de reservas de salas por horário, com Spring Boot e PostgreSQL: impede que 
 autentica com Keycloak, faz cache em Redis e expõe métricas no Grafana. Tudo roda local com Docker Compose.
 
 > **Status:** projeto de estudo, em construção. Prontos: o modelo relacional, o CRUD, a autenticação com autorização e a
-> proteção contra reserva dupla, com a corrida medida (Etapas 0 a 3). Faltam o cache, a observabilidade e a entrega.
+> proteção contra reserva dupla, com a corrida medida, o cache com Redis e a observabilidade com um experimento
+> de lentidão (Etapas 0 a 5). Falta a entrega (Etapa 6).
 > O que não existe está marcado como "a fazer".
 
 ## Problema
@@ -69,7 +70,7 @@ A observabilidade (Prometheus e Grafana) entra na Etapa 5.
 | Banco | PostgreSQL 17, com Flyway para o schema e o Hibernate só validando (`ddl-auto=validate`) |
 | Segurança | Spring Security 7 como resource server JWT, com Keycloak 26.8.1 (realm importado de JSON versionado) |
 | Cache | Redis 8, com `spring-boot-starter-data-redis` e `spring-boot-starter-cache` (Etapa 4) |
-| Observabilidade | Micrometer, OpenTelemetry, Prometheus e Grafana (a fazer, Etapa 5) |
+| Observabilidade | Micrometer, OpenTelemetry (traces OTLP), Prometheus, Grafana e Jaeger, logs JSON com `traceId` (Etapa 5) |
 | Testes | JUnit 5 e Testcontainers com PostgreSQL de verdade, sem mock de banco; tokens JWT reais assinados com uma chave de teste |
 | Build | Maven com wrapper (`./mvnw`), sem instalar o Maven |
 
@@ -78,7 +79,7 @@ A observabilidade (Prometheus e Grafana) entra na Etapa 5.
 Requisitos: JDK 25 e Docker.
 
 ```bash
-docker compose up -d         # PostgreSQL 17 (porta 5432, com volume), Keycloak (porta 8180) e Redis (porta 6379)
+docker compose up -d         # PostgreSQL 17 (5432, com volume), Keycloak (8180), Redis (6379), Prometheus (9090), Grafana (3001) e Jaeger (16686)
 ./mvnw spring-boot:run       # a API sobe na porta 8080 e o Flyway aplica as migrations
 docker compose down -v       # para tudo e apaga o volume
 ```
@@ -406,6 +407,78 @@ investiguei a causa; mantive o número na tabela em vez de descartá-lo. O teste
 consulta por rodada com o lock); as duas primeiras linhas vêm da execução anterior à troca do writer, e não ficaram
 como teste.
 
+### Observabilidade: métricas, logs e traces (Etapa 5)
+
+**Como subir.** `docker compose up -d` (agora com Prometheus, Grafana e Jaeger) e a API com `./mvnw spring-boot:run`.
+
+| O quê | Onde | Observação |
+|---|---|---|
+| API | http://localhost:8080 | |
+| Sondas e métricas (Actuator) | http://localhost:8081/actuator/... | **porta própria**, sem publicar para fora; na porta 8080 esses caminhos não existem (404, conferido) |
+| Dashboard | http://localhost:3001 (pasta "Room Booking API") | Grafana preso ao localhost, leitura anônima e admin/admin, só para desenvolvimento |
+| Prometheus e alertas | http://localhost:9090 | scrape a cada 5 s |
+| Traces | http://localhost:16686 | Jaeger, em memória |
+
+**Sondas.** `/actuator/health/liveness` (o processo está vivo?) e `/actuator/health/readiness` (pode receber tráfego?) são
+separadas. A readiness inclui o banco, e **não** inclui o Redis: o cache é opcional (a API funciona sem ele, veja a
+Etapa 4), então um Redis fora do ar não deve tirar a API do balanceador.
+
+**Métricas.** `/actuator/prometheus` (público na porta de gerenciamento, porque o Prometheus não tem token) com as
+métricas técnicas (requisições por status, histograma de latência para o p95) e duas de negócio, em `MetricasDeReservas`:
+`reservas_criadas_total` e `reservas_conflitos_total` (409 por sala ocupada; o replay de uma Idempotency-Key não conta
+como reserva criada). `/actuator/metrics` continua só para ADMIN.
+
+**Dashboard** (provisionado por arquivo, `observabilidade/grafana`; nada é configurado à mão): requisições por segundo, taxa
+de erros 5xx, latência p95, reservas criadas e conflitos 409.
+
+**Logs.** JSON, um objeto por linha, com `traceId` e `spanId` (Spring Boot `logging.structured.format.console=logstash`).
+Linha real, de `LogsEstruturadosTest`:
+
+```json
+{"@timestamp":"2026-11-04T18:39:42.6934761-03:00","@version":"1","message":"Conflito (409): A sala 'Sala dos logs' já está reservada em parte desse horário.","logger_name":"dev.heldem.reservas.comum.ApiExceptionHandler","thread_name":"main","level":"INFO","level_value":20000,"traceId":"b825a96e71c0a5c562afa59fe225d4fd","spanId":"6ec67d7e02341de3"}
+```
+
+**Traces.** OpenTelemetry (OTLP/HTTP) para o Jaeger, 100% das requisições (é uma API de estudo; em produção, amostragem).
+Além dos spans HTTP e de segurança, `datasource-micrometer` cria um span por query JDBC com o SQL (`jdbc.query[0]`).
+
+**Alertas** (`observabilidade/prometheus/alertas.yml`):
+
+| Alerta | Condição | Gravidade |
+|---|---|---|
+| `ApiLatenciaP95Alta` | p95 > 1 s por 5 minutos (sem contar `/actuator`) | warning |
+| `ApiTaxaDeErros5xxAlta` | mais de 5% das requisições com 5xx por 5 minutos | critical |
+
+As duas regras têm teste unitário com séries sintéticas (`alertas_test.yml`, `promtool test rules`): dispara só depois dos 5
+minutos, não dispara com latência normal nem com 1% de erro.
+
+**Experimento: lentidão injetada com `pg_sleep`.** Com `APP_DIAGNOSTICO=true`, existe `GET /diagnostico/lento?segundos=N`
+(só ADMIN), que roda `select pg_sleep(N)` no banco. **Vem desligado**: um endpoint que dorme à vontade seria uma arma de
+negação de serviço em produção (`ObservabilidadeTest` confere que ele não existe por padrão). Rodei 1,5 minuto de tráfego
+saudável e depois 9 minutos em que cada ciclo de cada um dos 4 clientes (`observabilidade/gerar-trafego.py lento`) chama
+o endpoint com `segundos=2`.
+
+1. **Dashboard:** a latência p95 salta para 2,08 s no instante em que a lentidão começa (e o painel fica
+   vermelho), sem nenhum erro: a taxa de 5xx continua 0. Lentidão não aparece em erro, só em latência.
+2. **Alerta:** `ApiLatenciaP95Alta` ficou *pending* às 18:33:07 e passou a *firing* às 18:38:13, os 5 minutos da regra.
+3. **Trace:** o trace de uma requisição lenta (`http get /diagnostico/lento`, 2,0 s) mostra os spans `security filterchain`
+   (menos de 1 ms), `connection` e `query` (2,0 s, com `select pg_sleep(?) is null`). O tempo todo está no span da query: a
+   lentidão está no banco, e não na aplicação, na rede nem na autenticação.
+
+![Dashboard com a latência p95 em 2,08 s](docs/imagens/dashboard-com-lentidao.jpg)
+
+![Alerta ApiLatenciaP95Alta em firing](docs/imagens/alerta-p95-firing.jpg)
+
+![Trace da requisição lenta, com o tempo todo no span da query](docs/imagens/jaeger-trace-pg-sleep.jpg)
+
+**Limites do que eu medi:**
+- O caminho dashboard → trace foi feito manualmente: peguei o `traceId` no Jaeger. O painel de latência tem exemplares
+  ligados (`management.tracing.exemplars.include=sampled-traces`) para o ponto levar direto ao trace, mas **não verifiquei**
+  que os pontos de exemplar apareceram no Grafana.
+- O alerta só foi observado em *firing* no Prometheus: não há Alertmanager, ninguém é notificado.
+- O gráfico de erros 5xx ficou "No data" porque não provoquei 5xx; a regra de 5xx foi testada só com séries sintéticas.
+- O dashboard foi capturado com o painel "Reservas criadas" mostrando casas decimais (`increase` extrapola); depois
+  troquei a consulta por `round(...)`, e o arquivo versionado já está assim, mas não refiz a imagem.
+
 ## Custo
 
 **Zero.** Tudo roda na máquina local com Docker; nada é aplicado na AWS. A parte opcional do roteiro que subiria a API
@@ -418,7 +491,7 @@ no ECS não será feita.
 - [x] Etapa 2: autenticação e autorização (Keycloak, JWT, papéis, regra de dono, 401 e 403 testados)
 - [x] Etapa 3: concorrência e reserva dupla (corrida reproduzida e medida, três soluções comparadas, 409, idempotência)
 - [x] Etapa 4: cache com Redis (TTL, evict, métricas, inconsistência e estouro de cache medidos)
-- [ ] Etapa 5: observabilidade
+- [x] Etapa 5: observabilidade (sondas, métricas, dashboard e alertas provisionados, logs JSON, traces, experimento `pg_sleep`)
 - [ ] Etapa 6: entrega
 
 ## Licença
