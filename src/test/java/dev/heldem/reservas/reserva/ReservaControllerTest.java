@@ -68,13 +68,40 @@ class ReservaControllerTest extends ApiTestBase {
                 + instante(0) + "\",\"fim\":\"" + instante(1) + "\"}")).hasStatus(HttpStatus.BAD_REQUEST);
     }
 
-    // Documenta o comportamento DESTA etapa. A Etapa 3 troca este teste: aí a sobreposição vira 409.
     @Test
-    void nestaEtapaAindaAceitaDuasReservasNoMesmoHorario() {
+    void sobreposicaoNaMesmaSalaDevolve409EmQualquerFormaDeSobrepor() {
         String salaId = criarSala("Sala Azul", 8);
+        criarReserva(salaId, "ana", 2, 4); // 12h-14h
 
-        assertThat(reservar(salaId, "ana", 0, 2)).hasStatus(HttpStatus.CREATED);
-        assertThat(reservar(salaId, "bia", 1, 3)).hasStatus(HttpStatus.CREATED);
+        // parcial no começo, parcial no fim, contida, contendo e idêntica
+        for (int[] horas : new int[][] { { 1, 3 }, { 3, 5 }, { 2, 3 }, { 1, 5 }, { 2, 4 } }) {
+            var resposta = reservar(salaId, "bia", horas[0], horas[1]);
+            assertThat(resposta).as("reserva %dh-%dh", horas[0], horas[1]).hasStatus(HttpStatus.CONFLICT);
+            assertThat(resposta).bodyJson().extractingPath("$.title").isEqualTo("Conflito");
+        }
+        assertThat(get("/reservas?salaId={s}", salaId)).bodyJson().extractingPath("$.total").isEqualTo(1);
+    }
+
+    @Test
+    void intervalosQueSoSeTocamNaoConflitamENemOutraSala() {
+        String sala = criarSala("Sala Azul", 8);
+        String outra = criarSala("Sala Verde", 8);
+        criarReserva(sala, "ana", 1, 2); // 11h-12h
+
+        assertThat(reservar(sala, "bia", 0, 1)).hasStatus(HttpStatus.CREATED);  // termina quando a outra começa
+        assertThat(reservar(sala, "bia", 2, 3)).hasStatus(HttpStatus.CREATED);  // começa quando a outra termina
+        assertThat(reservar(outra, "bia", 1, 2)).hasStatus(HttpStatus.CREATED); // mesmo horário, outra sala
+    }
+
+    @Test
+    void reservaCanceladaLiberaOHorario() {
+        String sala = criarSala("Sala Azul", 8);
+        String ana = criarReserva(sala, "ana", 0, 2);
+        assertThat(reservar(sala, "bia", 1, 3)).hasStatus(HttpStatus.CONFLICT);
+
+        assertThat(cancelar(ana, "ana")).hasStatus(HttpStatus.NO_CONTENT);
+
+        assertThat(reservar(sala, "bia", 1, 3)).hasStatus(HttpStatus.CREATED);
     }
 
     @Test

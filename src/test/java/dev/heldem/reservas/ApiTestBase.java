@@ -11,6 +11,8 @@ import org.springframework.context.annotation.Import;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
+import org.springframework.test.context.DynamicPropertyRegistry;
+import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.test.web.servlet.assertj.MockMvcTester;
 import org.springframework.test.web.servlet.assertj.MvcTestResult;
 import org.springframework.transaction.annotation.Transactional;
@@ -36,6 +38,14 @@ public abstract class ApiTestBase {
 
     @Autowired
     protected MockMvcTester mvc;
+
+    // 50 conexões, e não as 10 padrão do Hikari: os testes de concorrência disparam 50 requisições ao mesmo tempo e
+    // querem 50 sessões brigando no banco de verdade (com 10, as outras esperariam por uma conexão do pool). Vale para
+    // todas as classes que estendem esta base, então elas continuam compartilhando um só contexto do Spring.
+    @DynamicPropertySource
+    static void tamanhoDoPool(DynamicPropertyRegistry registro) {
+        registro.add("spring.datasource.hikari.maximum-pool-size", () -> "50");
+    }
 
     protected static String bearer(String token) {
         return "Bearer " + token;
