@@ -205,7 +205,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum(increase(reservas_criadas_total[$__range]))",
+          "expr": "round(sum(increase(reservas_criadas_total[$__range])))",
           "legendFormat": "",
           "refId": "A",
           "exemplar": false
@@ -214,7 +214,7 @@
       "fieldConfig": {
         "defaults": {
           "unit": "none",
-          "decimals": 2,
+          "decimals": 0,
           "noValue": "0",
           "thresholds": {
             "mode": "absolute",
