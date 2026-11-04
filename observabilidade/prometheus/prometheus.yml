@@ -1,0 +1,14 @@
+# Prometheus do ambiente local (docker compose). A API roda na máquina (./mvnw spring-boot:run), então o alvo é o host.
+global:
+  scrape_interval: 5s      # curto de propósito: estudo e experimentos; em produção 15s a 60s
+  evaluation_interval: 5s
+
+rule_files:
+  - /etc/prometheus/alertas.yml
+
+scrape_configs:
+  - job_name: room-booking-api
+    metrics_path: /actuator/prometheus
+    static_configs:
+      # porta de gerenciamento (management.server.port), não a porta da API
+      - targets: ["host.docker.internal:8081"]

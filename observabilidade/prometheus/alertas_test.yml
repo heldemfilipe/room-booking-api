@@ -1,0 +1,77 @@
+# Teste unitário das regras de alerta (promtool test rules), sem subir nada:
+#   docker run --rm -v "$PWD/observabilidade/prometheus:/r" --entrypoint promtool prom/prometheus:v3.15.1 test rules /r/alertas_test.yml
+rule_files:
+  - alertas.yml
+
+evaluation_interval: 15s
+
+tests:
+  # p95 alto: todas as requisições em /salas levam entre 2 s e 5 s (bucket le="5"), durante 10 minutos
+  - interval: 15s
+    input_series:
+      - series: 'http_server_requests_seconds_bucket{uri="/salas", le="0.5"}'
+        values: '0+0x60'
+      - series: 'http_server_requests_seconds_bucket{uri="/salas", le="1"}'
+        values: '0+0x60'
+      - series: 'http_server_requests_seconds_bucket{uri="/salas", le="5"}'
+        values: '0+15x60'
+      - series: 'http_server_requests_seconds_bucket{uri="/salas", le="+Inf"}'
+        values: '0+15x60'
+    alert_rule_test:
+      - eval_time: 3m          # ainda dentro do "for: 5m": pendente, não dispara
+        alertname: ApiLatenciaP95Alta
+        exp_alerts: []
+      - eval_time: 8m          # passou de 5 minutos acima do limite: dispara
+        alertname: ApiLatenciaP95Alta
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: "p95 da API acima de 1 s por 5 minutos"
+              description: "p95 atual: 4.8s. Veja o painel de latência e siga o traceId até o span lento (Jaeger)."
+
+  # latência normal: tudo abaixo de 0,5 s, nada dispara
+  - interval: 15s
+    input_series:
+      - series: 'http_server_requests_seconds_bucket{uri="/salas", le="0.5"}'
+        values: '0+15x60'
+      - series: 'http_server_requests_seconds_bucket{uri="/salas", le="1"}'
+        values: '0+15x60'
+      - series: 'http_server_requests_seconds_bucket{uri="/salas", le="+Inf"}'
+        values: '0+15x60'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: ApiLatenciaP95Alta
+        exp_alerts: []
+
+  # taxa de 5xx: 20% das requisições (3 de cada 15) respondendo 500
+  - interval: 15s
+    input_series:
+      - series: 'http_server_requests_seconds_count{uri="/reservas", status="500"}'
+        values: '0+3x60'
+      - series: 'http_server_requests_seconds_count{uri="/reservas", status="201"}'
+        values: '0+12x60'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: ApiTaxaDeErros5xxAlta
+        exp_alerts: []
+      - eval_time: 8m
+        alertname: ApiTaxaDeErros5xxAlta
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: "Mais de 5% das requisições da API dando 5xx por 5 minutos"
+              description: "Taxa atual de 5xx: 20%."
+
+  # só 1% de 5xx: abaixo do limite, não dispara
+  - interval: 15s
+    input_series:
+      - series: 'http_server_requests_seconds_count{uri="/reservas", status="500"}'
+        values: '0+1x60'
+      - series: 'http_server_requests_seconds_count{uri="/reservas", status="201"}'
+        values: '0+99x60'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: ApiTaxaDeErros5xxAlta
+        exp_alerts: []

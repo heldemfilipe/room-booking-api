@@ -1,6 +1,6 @@
 # Dependências da API para o desenvolvimento local: docker compose up -d
 # As senhas abaixo e as do realm (keycloak/realm-reservas.json) são SÓ para desenvolvimento local.
-# Não use estes valores em nenhum outro ambiente. (Prometheus e Grafana entram na Etapa 5.)
+# Não use estes valores em nenhum outro ambiente. (Grafana: admin/admin, também só local.)
 services:
   db:
     image: postgres:17
@@ -41,6 +41,41 @@ services:
       interval: 3s
       timeout: 3s
       retries: 20
+
+  # --- Observabilidade (Etapa 5). A API roda na máquina; o Prometheus a alcança por host.docker.internal:8081 ---
+  prometheus:
+    image: prom/prometheus:v3.15.1
+    ports:
+      - "9090:9090"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./observabilidade/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./observabilidade/prometheus/alertas.yml:/etc/prometheus/alertas.yml:ro
+
+  # Traces (OTLP/HTTP na 4318, interface na 16686). Armazenamento em memória: some ao reiniciar.
+  jaeger:
+    image: jaegertracing/jaeger:2.22.0
+    ports:
+      - "16686:16686"
+      - "4318:4318"
+
+  # Login admin/admin só para desenvolvimento local (e acesso anônimo de leitura desligado). Datasources e dashboard vêm
+  # dos arquivos em observabilidade/grafana (provisionados), nada é configurado à mão.
+  grafana:
+    image: grafana/grafana:13.2.5
+    ports:
+      - "3001:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - ./observabilidade/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observabilidade/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      - prometheus
+      - jaeger
 
 volumes:
   pgdata:
