@@ -4,10 +4,12 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import java.time.Instant;
 
+import org.junit.jupiter.api.BeforeEach;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
 import org.springframework.context.annotation.Import;
+import org.springframework.data.redis.connection.RedisConnectionFactory;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
@@ -38,6 +40,21 @@ public abstract class ApiTestBase {
 
     @Autowired
     protected MockMvcTester mvc;
+
+    @Autowired
+    private RedisConnectionFactory redis;
+
+    /**
+     * Esvazia o Redis antes de cada teste: o contêiner é um só para a JVM e testes sem transação (concorrência, cache)
+     * deixam entradas nele. Direto no Redis, e não pelo CacheManager: o cache é transacional (grava e apaga só no
+     * commit), então dentro do teste, que faz rollback, um clear() nunca executaria.
+     */
+    @BeforeEach
+    void limparCache() {
+        try (var conexao = redis.getConnection()) {
+            conexao.serverCommands().flushAll();
+        }
+    }
 
     // 50 conexões, e não as 10 padrão do Hikari: os testes de concorrência disparam 50 requisições ao mesmo tempo e
     // querem 50 sessões brigando no banco de verdade (com 10, as outras esperariam por uma conexão do pool). Vale para

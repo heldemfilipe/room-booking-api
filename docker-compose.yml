@@ -1,6 +1,6 @@
 # Dependências da API para o desenvolvimento local: docker compose up -d
 # As senhas abaixo e as do realm (keycloak/realm-reservas.json) são SÓ para desenvolvimento local.
-# Não use estes valores em nenhum outro ambiente. (Redis, Prometheus e Grafana entram nas Etapas 4 e 5.)
+# Não use estes valores em nenhum outro ambiente. (Prometheus e Grafana entram na Etapa 5.)
 services:
   db:
     image: postgres:17
@@ -30,6 +30,17 @@ services:
       - "8180:8080"
     volumes:
       - ./keycloak/realm-reservas.json:/opt/keycloak/data/import/realm-reservas.json:ro
+
+  # Redis do cache da listagem de salas (Etapa 4). Sem senha, só para desenvolvimento local.
+  redis:
+    image: redis:8.10.3-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
 
 volumes:
   pgdata:
