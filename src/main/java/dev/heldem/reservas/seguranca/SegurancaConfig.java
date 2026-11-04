@@ -42,7 +42,11 @@ class SegurancaConfig {
                 .cors(Customizer.withDefaults())
                 .sessionManagement(sessao -> sessao.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
                 .authorizeHttpRequests(regras -> regras
-                        .requestMatchers("/actuator/health", "/actuator/health/**").permitAll()
+                        // saúde (sondas do orquestrador) e /actuator/prometheus (o Prometheus não tem token): públicos
+                        // NA PORTA DE GERENCIAMENTO (management.server.port), que não é publicada para fora. Na porta da
+                        // API esses caminhos nem existem.
+                        .requestMatchers("/actuator/health", "/actuator/health/**", "/actuator/prometheus").permitAll()
+                        .requestMatchers("/diagnostico/**").hasRole("ADMIN") // só existe com app.diagnostico.habilitado
                         // métricas (inclusive as do cache): só ADMIN. O que não está exposto em
                         // management.endpoints.web.exposure.include nem existe, e o resto cai no denyAll
                         .requestMatchers("/actuator/metrics", "/actuator/metrics/**").hasRole("ADMIN")

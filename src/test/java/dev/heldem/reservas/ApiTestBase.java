@@ -27,7 +27,9 @@ import org.springframework.transaction.annotation.Transactional;
  * <p>Identidades: {@code ADMIN} (papel ADMIN) é o padrão dos helpers de salas e de leitura; {@code reservar} e
  * {@code cancelar} agem como um usuário comum (papel USER) cujo {@code sub} é o nome passado ("ana", "bia").
  */
-@SpringBootTest
+// sem exportar traces nos testes, e com o Actuator na mesma "porta" do MockMvc (em produção ele tem porta própria, 8081)
+@SpringBootTest(properties = { "management.tracing.export.enabled=false", "management.server.port=",
+        "management.prometheus.metrics.export.enabled=true" })
 @AutoConfigureMockMvc
 @Import({ TestcontainersConfiguration.class, TokensDeTeste.class })
 @Transactional

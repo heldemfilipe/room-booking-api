@@ -31,9 +31,11 @@ import jakarta.validation.constraints.Min;
 public class ReservaController {
 
     private final ReservaService service;
+    private final MetricasDeReservas metricas;
 
-    public ReservaController(ReservaService service) {
+    public ReservaController(ReservaService service, MetricasDeReservas metricas) {
         this.service = service;
+        this.metricas = metricas;
     }
 
     // O dono é o "sub" do token validado, nunca algo que o cliente escreve no corpo.
@@ -44,6 +46,9 @@ public class ReservaController {
             @RequestHeader(value = "Idempotency-Key", required = false) String chave,
             @Valid @RequestBody CriarReservaRequest request) {
         var resultado = service.criar(token.getSubject(), chave, request);
+        if (!resultado.repetida()) {
+            metricas.criada();
+        }
         ReservaResponse criada = resultado.reserva();
         URI local = ServletUriComponentsBuilder.fromCurrentRequest().path("/{id}").buildAndExpand(criada.id()).toUri();
         var resposta = ResponseEntity.created(local);

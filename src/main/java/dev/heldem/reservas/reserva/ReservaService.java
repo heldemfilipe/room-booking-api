@@ -48,9 +48,11 @@ public class ReservaService {
     private final ChaveIdempotenciaRepository chaves;
     private final SalaService salaService;
     private final Clock clock;
+    private final MetricasDeReservas metricas;
 
     public ReservaService(ReservaRepository repository, ChaveIdempotenciaRepository chaves, SalaService salaService,
-            Clock clock) {
+            Clock clock, MetricasDeReservas metricas) {
+        this.metricas = metricas;
         this.repository = repository;
         this.chaves = chaves;
         this.salaService = salaService;
@@ -148,6 +150,7 @@ public class ReservaService {
                 // esperando uma pela outra no índice da constraint e derruba a(s) perdedora(s) com deadlock (depois de
                 // deadlock_timeout, 1 s). O resultado continua correto (só uma reserva entra); a perdedora é um conflito
                 // de concorrência, e não um erro do servidor.
+                metricas.conflito();
                 throw new ConflitoException("Outra reserva da sala '" + sala.getNome()
                         + "' estava sendo feita ao mesmo tempo e levou a melhor. Consulte a disponibilidade e tente de novo.");
             }
@@ -165,7 +168,8 @@ public class ReservaService {
         return null;
     }
 
-    private static ConflitoException salaOcupada(Sala sala) {
+    private ConflitoException salaOcupada(Sala sala) {
+        metricas.conflito();
         return new ConflitoException("A sala '" + sala.getNome() + "' já está reservada em parte desse horário.");
     }
 

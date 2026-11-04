@@ -53,7 +53,8 @@ class ReservaServiceTest {
 
     @BeforeEach
     void montar() {
-        service = new ReservaService(repository, chaves, salaService, Clock.fixed(AGORA, ZoneOffset.UTC));
+        service = new ReservaService(repository, chaves, salaService, Clock.fixed(AGORA, ZoneOffset.UTC),
+                new MetricasDeReservas(new io.micrometer.core.instrument.simple.SimpleMeterRegistry()));
         when(salaService.buscarParaReservar(salaId)).thenReturn(sala);
         when(repository.existeSobreposicao(any(), any(), any())).thenReturn(false); // a consulta não vê o conflito
     }
