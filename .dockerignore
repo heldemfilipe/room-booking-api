@@ -1,0 +1,9 @@
+.git
+.github
+target
+docs
+observabilidade
+keycloak
+k6
+*.md
+docker-compose.yml
