@@ -52,7 +52,7 @@ public class SalaService {
      * A listagem de salas vem do cache (Redis, TTL de 5 minutos). Guarda o DTO, e não a entidade JPA. As escritas abaixo
      * esvaziam o cache; uma alteração feita direto no banco só aparece quando o TTL vence. As reservas não são cacheadas.
      */
-    @Cacheable(cacheNames = CacheConfig.SALAS)
+    @Cacheable(cacheNames = CacheConfig.SALAS, sync = true)
     @Transactional(readOnly = true)
     public List<SalaResponse> listar() {
         return repository.findAll(Sort.by("nome", "id")).stream().map(SalaResponse::de).toList();

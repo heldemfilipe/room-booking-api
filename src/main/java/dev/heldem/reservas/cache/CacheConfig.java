@@ -12,6 +12,7 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.data.redis.cache.RedisCacheConfiguration;
 import org.springframework.data.redis.cache.RedisCacheManager;
+import org.springframework.data.redis.cache.RedisCacheWriter;
 import org.springframework.data.redis.connection.RedisConnectionFactory;
 import org.springframework.data.redis.serializer.JacksonJsonRedisSerializer;
 import org.springframework.data.redis.serializer.RedisSerializationContext.SerializationPair;
@@ -32,6 +33,10 @@ import tools.jackson.databind.json.JsonMapper;
  *   <li><b>Transacional:</b> {@code transactionAware()} faz o {@code @CacheEvict} e o {@code @Cacheable} acontecerem
  *       DEPOIS do commit. Sem isso, o evict roda antes do commit, um leitor concorrente relê o valor antigo do banco e
  *       o devolve ao cache: o dado velho fica lá até o TTL.</li>
+ *   <li><b>Writer com lock:</b> {@code @Cacheable(sync = true)} só evita o estouro de cache (várias requisições
+ *       recalculando a mesma chave) se o writer travar de verdade. O padrão ({@code nonLocking}) não trava: medido, 50
+ *       requisições juntas sobre o cache vazio fizeram de 5 a 26 consultas ao banco, com ou sem {@code sync}. O
+ *       {@code lockingRedisCacheWriter} usa um lock no próprio Redis (vale entre instâncias da API): 1 consulta.</li>
  *   <li><b>Estatísticas ligadas:</b> o Micrometer expõe {@code cache.gets} (hit e miss), {@code cache.puts} etc.</li>
  *   <li><b>O cache é uma otimização, não uma dependência:</b> se o Redis cair, a API segue servindo do banco
  *       ({@link CacheTolerante}).</li>
@@ -58,7 +63,7 @@ public class CacheConfig implements CachingConfigurer {
                 .disableCachingNullValues()
                 .prefixCacheNameWith("reservas:") // as chaves ficam como reservas:salas::SimpleKey []
                 .serializeValuesWith(SerializationPair.fromSerializer(new JacksonJsonRedisSerializer<>(json, listaDeSalas)));
-        return RedisCacheManager.builder(conexao)
+        return RedisCacheManager.builder(RedisCacheWriter.lockingRedisCacheWriter(conexao))
                 .cacheDefaults(salas)
                 .withInitialCacheConfigurations(Map.of(SALAS, salas))
                 .transactionAware()
