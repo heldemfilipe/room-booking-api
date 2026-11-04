@@ -1,9 +1,11 @@
 package dev.heldem.reservas.reserva;
 
+import java.sql.SQLException;
 import java.time.Clock;
 import java.time.Instant;
 import java.util.UUID;
 
+import org.springframework.dao.DataAccessException;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Sort;
@@ -26,6 +28,10 @@ import dev.heldem.reservas.sala.SalaService;
 @Service
 public class ReservaService {
 
+    // SQLStates do PostgreSQL: 23P01 = exclusion_violation (a constraint recusou); 40P01 = deadlock_detected
+    private static final String EXCLUSION_VIOLATION = "23P01";
+    private static final String DEADLOCK_DETECTED = "40P01";
+
     // lista estável: por início, com o id como desempate
     private static final Sort ORDEM = Sort.by("inicio", "id");
 
@@ -40,9 +46,9 @@ public class ReservaService {
     }
 
     /**
-     * VERSÃO INGÊNUA (Etapa 3, ponto de partida): consulta se há conflito e insere se não houver. Isso é uma condição de
-     * corrida: duas transações podem consultar ao mesmo tempo, as duas não verem conflito (cada uma não enxerga o insert,
-     * ainda não confirmado, da outra) e as duas inserirem. O teste CorridaDeReservasTest reproduz o erro.
+     * A garantia de que não há reserva dupla é do BANCO: a exclusion constraint ex_reservas_sem_sobreposicao (migration
+     * V3). A consulta de sobreposição abaixo continua, mas só para dar a resposta 409 sem um erro de banco no caso comum;
+     * quem fecha a corrida é a constraint, e a violação dela também vira 409, nunca 500.
      */
     @Transactional
     public ReservaResponse criar(String usuarioId, CriarReservaRequest request) {
@@ -50,10 +56,41 @@ public class ReservaService {
         Instant inicio = Datas.paraOBanco(request.inicio());
         Instant fim = Datas.paraOBanco(request.fim());
         if (repository.existeSobreposicao(sala.getId(), inicio, fim)) {
-            throw new ConflitoException("A sala '" + sala.getNome() + "' já está reservada em parte desse horário.");
+            throw salaOcupada(sala);
         }
         var reserva = new Reserva(sala, usuarioId, inicio, fim, Datas.agora(clock));
-        return ReservaResponse.de(repository.save(reserva));
+        try {
+            // saveAndFlush: a violação da constraint precisa estourar aqui, dentro do try, e não no commit
+            return ReservaResponse.de(repository.saveAndFlush(reserva));
+        } catch (DataAccessException ex) {
+            String sqlState = sqlState(ex);
+            if (EXCLUSION_VIOLATION.equals(sqlState)) {
+                throw salaOcupada(sala);
+            }
+            if (DEADLOCK_DETECTED.equals(sqlState)) {
+                // Achado do experimento: com muitas transações disputando o MESMO horário, o PostgreSQL pode deixar duas
+                // esperando uma pela outra no índice da constraint e derruba a(s) perdedora(s) com deadlock (depois de
+                // deadlock_timeout, 1 s). O resultado continua correto (só uma reserva entra); a perdedora é um conflito
+                // de concorrência, e não um erro do servidor.
+                throw new ConflitoException("Outra reserva da sala '" + sala.getNome()
+                        + "' estava sendo feita ao mesmo tempo e levou a melhor. Consulte a disponibilidade e tente de novo.");
+            }
+            throw ex;
+        }
+    }
+
+    /** O SQLState do erro do banco, procurado na cadeia de causas (sem depender da classe do driver). */
+    private static String sqlState(Throwable erro) {
+        for (Throwable causa = erro; causa != null; causa = causa.getCause()) {
+            if (causa instanceof SQLException sql && sql.getSQLState() != null) {
+                return sql.getSQLState();
+            }
+        }
+        return null;
+    }
+
+    private static ConflitoException salaOcupada(Sala sala) {
+        return new ConflitoException("A sala '" + sala.getNome() + "' já está reservada em parte desse horário.");
     }
 
     @Transactional(readOnly = true)
